@@ -611,7 +611,14 @@ impl DiskInfoApp {
                             .temperature_c
                             .map(|value| show_temperature(value, self.fahrenheit))
                             .unwrap_or_else(|| "--".into());
-                        let status_color = status_color(drive, self.green_mode);
+                        let settings = self
+                            .settings
+                            .drives
+                            .get(&drive.name)
+                            .cloned()
+                            .unwrap_or_else(|| DriveSettings::defaults(drive));
+                        let status_color =
+                            status_label_with_settings(drive, &settings, self.green_mode).1;
                         let button = egui::Button::new(
                             RichText::new(format!("Disk{index}\n{temperature}"))
                                 .size(12.0)
@@ -711,12 +718,8 @@ fn drive_view(
                                 let temperature_color = drive
                                     .temperature_c
                                     .map(|temperature| {
-                                        if temperature > i64::from(settings.temperature_alarm) {
+                                        if temperature >= i64::from(settings.temperature_alarm) {
                                             Color32::from_rgb(234, 77, 77)
-                                        } else if temperature
-                                            == i64::from(settings.temperature_alarm)
-                                        {
-                                            Color32::from_rgb(224, 170, 55)
                                         } else {
                                             color
                                         }
@@ -969,7 +972,7 @@ fn nvme_table(ui: &mut egui::Ui, drive: &Drive) {
 
 fn status_label(drive: &Drive, green_mode: bool) -> (&'static str, Color32) {
     match drive.smart_status {
-        Some(false) => ("Caution", Color32::from_rgb(235, 87, 87)),
+        Some(false) => ("Bad", Color32::from_rgb(234, 77, 77)),
         Some(true) if green_mode => ("Good", Color32::from_rgb(87, 205, 95)),
         Some(true) => ("Good", Color32::from_rgb(55, 181, 118)),
         None => ("Unknown", Color32::from_rgb(145, 150, 160)),
@@ -1009,21 +1012,19 @@ fn status_label_with_settings(
             caution = true;
         }
     }
-    if let Some(temperature) = drive.temperature_c
-        && temperature >= i64::from(settings.temperature_alarm)
-    {
-        caution = true;
-    }
     let (base_status, base_color) = status_label(drive, green_mode);
+    if drive
+        .temperature_c
+        .is_some_and(|temperature| temperature >= i64::from(settings.temperature_alarm))
+        && base_status != "Bad"
+    {
+        return ("Bad", Color32::from_rgb(234, 77, 77));
+    }
     if base_status == "Good" && caution {
         ("Caution", Color32::from_rgb(224, 170, 55))
     } else {
         (base_status, base_color)
     }
-}
-
-fn status_color(drive: &Drive, green_mode: bool) -> Color32 {
-    status_label(drive, green_mode).1
 }
 
 fn show_temperature(celsius: i64, fahrenheit: bool) -> String {
