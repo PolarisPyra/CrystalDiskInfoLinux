@@ -1,7 +1,7 @@
 use crate::storage::{self, Drive};
 use gtk::{
-    Align, Application, ApplicationWindow, Box as GtkBox, Button, Label, ListBox, ListBoxRow,
-    Orientation, SelectionMode, glib, prelude::*,
+    Align, Application, ApplicationWindow, Box as GtkBox, Button, Grid, Label, ListBox, ListBoxRow,
+    Orientation, ScrolledWindow, SelectionMode, glib, prelude::*,
 };
 use std::{cell::RefCell, rc::Rc};
 
@@ -31,6 +31,9 @@ pub fn build(app: &Application) {
     sidebar.append(&list);
     content.append(&sidebar);
 
+    let detail_scroll = ScrolledWindow::new();
+    detail_scroll.set_hexpand(true);
+    detail_scroll.set_vexpand(true);
     let detail = GtkBox::new(Orientation::Vertical, 18);
     detail.set_hexpand(true);
     detail.set_margin_top(30);
@@ -53,13 +56,28 @@ pub fn build(app: &Application) {
     let details = GtkBox::new(Orientation::Vertical, 0);
     details.add_css_class("details-card");
     detail.append(&details);
+    let nvme_title = section_title("NVME HEALTH LOG");
+    detail.append(&nvme_title);
+    let nvme_metrics = Grid::new();
+    nvme_metrics.set_column_spacing(24);
+    nvme_metrics.set_row_spacing(8);
+    nvme_metrics.add_css_class("details-card");
+    detail.append(&nvme_metrics);
+    let ata_title = section_title("ATA S.M.A.R.T. ATTRIBUTES");
+    detail.append(&ata_title);
+    let ata_attributes = Grid::new();
+    ata_attributes.set_column_spacing(18);
+    ata_attributes.set_row_spacing(8);
+    ata_attributes.add_css_class("details-card");
+    detail.append(&ata_attributes);
     let footer = Label::new(Some(
         "SMART access may require elevated device permissions or smartmontools.",
     ));
     footer.set_halign(Align::Start);
     footer.add_css_class("dim-label");
     detail.append(&footer);
-    content.append(&detail);
+    detail_scroll.set_child(Some(&detail));
+    content.append(&detail_scroll);
     root.append(&content);
 
     let drives = Rc::new(RefCell::new(Vec::<Drive>::new()));
@@ -70,6 +88,10 @@ pub fn build(app: &Application) {
     let health_for_refresh = health.clone();
     let note_for_refresh = health_note.clone();
     let details_for_refresh = details.clone();
+    let nvme_for_refresh = nvme_metrics.clone();
+    let ata_for_refresh = ata_attributes.clone();
+    let nvme_title_for_refresh = nvme_title.clone();
+    let ata_title_for_refresh = ata_title.clone();
     refresh.connect_clicked(move |_| {
         refresh_drives(
             &list_for_refresh,
@@ -77,6 +99,10 @@ pub fn build(app: &Application) {
             &health_for_refresh,
             &note_for_refresh,
             &details_for_refresh,
+            &nvme_for_refresh,
+            &ata_for_refresh,
+            &nvme_title_for_refresh,
+            &ata_title_for_refresh,
         )
     });
     if let Some(header_bar) = root.first_child().and_then(|w| w.downcast::<GtkBox>().ok()) {
@@ -90,6 +116,10 @@ pub fn build(app: &Application) {
     let health_for_select = health.clone();
     let note_for_select = health_note.clone();
     let details_for_select = details.clone();
+    let nvme_for_select = nvme_metrics.clone();
+    let ata_for_select = ata_attributes.clone();
+    let nvme_title_for_select = nvme_title.clone();
+    let ata_title_for_select = ata_title.clone();
     list.connect_row_selected(move |_, row| {
         if let Some(row) = row {
             let index = row.index() as usize;
@@ -99,12 +129,26 @@ pub fn build(app: &Application) {
                     &health_for_select,
                     &note_for_select,
                     &details_for_select,
+                    &nvme_for_select,
+                    &ata_for_select,
+                    &nvme_title_for_select,
+                    &ata_title_for_select,
                 );
             }
         }
     });
     window.set_child(Some(&root));
-    refresh_drives(&list, &drives, &health, &health_note, &details);
+    refresh_drives(
+        &list,
+        &drives,
+        &health,
+        &health_note,
+        &details,
+        &nvme_metrics,
+        &ata_attributes,
+        &nvme_title,
+        &ata_title,
+    );
     window.present();
 }
 
@@ -142,6 +186,10 @@ fn refresh_drives(
     health: &Label,
     note: &Label,
     details: &GtkBox,
+    nvme_metrics: &Grid,
+    ata_attributes: &Grid,
+    nvme_title: &Label,
+    ata_title: &Label,
 ) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
@@ -175,12 +223,25 @@ fn refresh_drives(
         health.set_text("No drives found");
         note.set_text("Linux block devices were not available under /sys/block.");
         clear_details(details);
+        clear_grid(nvme_metrics);
+        clear_grid(ata_attributes);
+        nvme_title.set_visible(false);
+        ata_title.set_visible(false);
     } else {
         list.select_row(list.row_at_index(0).as_ref());
     }
 }
 
-fn show_drive(drive: &Drive, health: &Label, note: &Label, details: &GtkBox) {
+fn show_drive(
+    drive: &Drive,
+    health: &Label,
+    note: &Label,
+    details: &GtkBox,
+    nvme_metrics: &Grid,
+    ata_attributes: &Grid,
+    nvme_title: &Label,
+    ata_title: &Label,
+) {
     health.set_text(if drive.assessment.is_empty() {
         "Health unavailable"
     } else {
@@ -234,12 +295,16 @@ fn show_drive(drive: &Drive, health: &Label, note: &Label, details: &GtkBox) {
     );
     add_detail(
         details,
-        "Estimated life remaining",
+        "Estimated NVMe life remaining",
         &drive
             .health_percent
             .map(|v| format!("{v}%"))
             .unwrap_or_else(|| "Unavailable".into()),
     );
+    populate_nvme_metrics(nvme_metrics, drive);
+    populate_ata_attributes(ata_attributes, drive);
+    nvme_title.set_visible(!drive.nvme_metrics.is_empty());
+    ata_title.set_visible(!drive.ata_attributes.is_empty());
 }
 
 fn clear_details(details: &GtkBox) {
@@ -267,6 +332,81 @@ fn add_detail(details: &GtkBox, name: &str, value: &str) {
     details.append(&row);
     let separator = gtk::Separator::new(Orientation::Horizontal);
     details.append(&separator);
+}
+
+fn clear_grid(grid: &Grid) {
+    while let Some(child) = grid.first_child() {
+        grid.remove(&child);
+    }
+}
+
+fn grid_label(text: &str, column: i32, row: i32, grid: &Grid, bold: bool) {
+    let label = Label::new(Some(text));
+    label.set_halign(if column == 0 {
+        Align::Start
+    } else {
+        Align::End
+    });
+    label.set_selectable(true);
+    label.add_css_class(if bold {
+        "table-heading"
+    } else {
+        "detail-value"
+    });
+    grid.attach(&label, column, row, 1, 1);
+}
+
+fn populate_nvme_metrics(grid: &Grid, drive: &Drive) {
+    clear_grid(grid);
+    grid_label("Metric", 0, 0, grid, true);
+    grid_label("Value", 1, 0, grid, true);
+    for (index, metric) in drive.nvme_metrics.iter().enumerate() {
+        let row = index as i32 + 1;
+        grid_label(&metric.name, 0, row, grid, false);
+        grid_label(&metric.value, 1, row, grid, false);
+    }
+    grid.set_visible(!drive.nvme_metrics.is_empty());
+}
+
+fn populate_ata_attributes(grid: &Grid, drive: &Drive) {
+    clear_grid(grid);
+    let headers = [
+        "ID",
+        "Attribute",
+        "Current",
+        "Worst",
+        "Threshold",
+        "Raw value",
+    ];
+    for (column, header) in headers.iter().enumerate() {
+        grid_label(header, column as i32, 0, grid, true);
+    }
+    for (index, attribute) in drive.ata_attributes.iter().enumerate() {
+        let row = index as i32 + 1;
+        let id = attribute.id.to_string();
+        let current = attribute.current.to_string();
+        let worst = attribute.worst.to_string();
+        let threshold = attribute.threshold.to_string();
+        let name = if attribute.failed {
+            format!("{} (failed)", attribute.name)
+        } else {
+            attribute.name.clone()
+        };
+        for (column, value) in [
+            id.as_str(),
+            name.as_str(),
+            current.as_str(),
+            worst.as_str(),
+            threshold.as_str(),
+            attribute.raw.as_str(),
+        ]
+        .iter()
+        .enumerate()
+        {
+            grid_label(value, column as i32, row, grid, false);
+        }
+    }
+    grid.set_visible(!drive.ata_attributes.is_empty());
 }
 
 pub fn install_css() {

@@ -15,6 +15,25 @@ pub struct Drive {
     pub assessment: String,
     pub smart_available: bool,
     pub note: Option<String>,
+    pub nvme_metrics: Vec<Metric>,
+    pub ata_attributes: Vec<AtaSmartAttribute>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Metric {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct AtaSmartAttribute {
+    pub id: u8,
+    pub name: String,
+    pub current: u16,
+    pub worst: u16,
+    pub threshold: u16,
+    pub raw: String,
+    pub failed: bool,
 }
 
 #[derive(Deserialize)]
@@ -49,8 +68,19 @@ struct SmartStatus {
 #[derive(Deserialize)]
 struct NvmeHealth {
     temperature: Option<i64>,
+    available_spare: Option<u8>,
+    available_spare_threshold: Option<u8>,
     power_on_hours: Option<u64>,
     percentage_used: Option<u8>,
+    data_units_read: Option<u64>,
+    data_units_written: Option<u64>,
+    host_reads: Option<u64>,
+    host_writes: Option<u64>,
+    controller_busy_time: Option<u64>,
+    power_cycles: Option<u64>,
+    unsafe_shutdowns: Option<u64>,
+    media_errors: Option<u64>,
+    num_err_log_entries: Option<u64>,
 }
 #[derive(Deserialize)]
 struct AtaAttributes {
@@ -59,6 +89,11 @@ struct AtaAttributes {
 #[derive(Deserialize)]
 struct AtaAttribute {
     id: Option<u8>,
+    name: Option<String>,
+    value: Option<u16>,
+    worst: Option<u16>,
+    thresh: Option<u16>,
+    when_failed: Option<String>,
     raw: Option<RawValue>,
 }
 #[derive(Deserialize)]
@@ -163,9 +198,76 @@ fn merge_smart(drive: &mut Drive, result: SmartctlEnvelope) {
         drive.health_percent = nvme
             .percentage_used
             .map(|used| 100u8.saturating_sub(used.min(100)));
+        let metrics = [
+            (
+                "Available spare",
+                nvme.available_spare.map(|v| format!("{v}%")),
+            ),
+            (
+                "Available spare threshold",
+                nvme.available_spare_threshold.map(|v| format!("{v}%")),
+            ),
+            (
+                "Percentage used",
+                nvme.percentage_used.map(|v| format!("{v}%")),
+            ),
+            (
+                "Data units read",
+                nvme.data_units_read.map(|v| v.to_string()),
+            ),
+            (
+                "Data units written",
+                nvme.data_units_written.map(|v| v.to_string()),
+            ),
+            ("Host read commands", nvme.host_reads.map(|v| v.to_string())),
+            (
+                "Host write commands",
+                nvme.host_writes.map(|v| v.to_string()),
+            ),
+            (
+                "Controller busy time",
+                nvme.controller_busy_time.map(|v| format!("{v} minutes")),
+            ),
+            ("Power cycles", nvme.power_cycles.map(|v| v.to_string())),
+            (
+                "Unsafe shutdowns",
+                nvme.unsafe_shutdowns.map(|v| v.to_string()),
+            ),
+            ("Media errors", nvme.media_errors.map(|v| v.to_string())),
+            (
+                "Error log entries",
+                nvme.num_err_log_entries.map(|v| v.to_string()),
+            ),
+        ];
+        drive
+            .nvme_metrics
+            .extend(metrics.into_iter().filter_map(|(name, value)| {
+                value.map(|value| Metric {
+                    name: name.into(),
+                    value,
+                })
+            }));
     }
     if let Some(attributes) = data.ata_smart_attributes.and_then(|v| v.table) {
         for attribute in attributes {
+            if let (Some(id), Some(name)) = (attribute.id, attribute.name.as_ref()) {
+                let raw = attribute.raw.as_ref();
+                drive.ata_attributes.push(AtaSmartAttribute {
+                    id,
+                    name: name.clone(),
+                    current: attribute.value.unwrap_or_default(),
+                    worst: attribute.worst.unwrap_or_default(),
+                    threshold: attribute.thresh.unwrap_or_default(),
+                    raw: raw
+                        .and_then(|raw| raw.string.clone())
+                        .or_else(|| raw.and_then(|raw| raw.value).map(|v| v.to_string()))
+                        .unwrap_or_else(|| "-".into()),
+                    failed: attribute
+                        .when_failed
+                        .as_deref()
+                        .is_some_and(|s| s != "-" && !s.is_empty()),
+                });
+            }
             let raw = attribute.raw;
             let value = raw.as_ref().and_then(|raw| raw.value);
             match attribute.id {
