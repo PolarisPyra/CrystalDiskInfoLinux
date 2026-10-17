@@ -63,6 +63,7 @@ pub struct DiskInfoApp {
     settings: UserSettings,
     temperature_dialog: bool,
     health_dialog: bool,
+    sound_dialog: bool,
     settings_drive: String,
     temperature_draft: i32,
     health_draft: HealthThresholds,
@@ -111,6 +112,12 @@ struct UserSettings {
     auto_detection_seconds: u32,
     #[serde(default)]
     event_log: bool,
+    #[serde(default = "default_alert_sound")]
+    alert_sound: bool,
+    #[serde(default)]
+    alert_sound_path: String,
+    #[serde(default = "default_alert_sound_volume")]
+    alert_sound_volume: u8,
 }
 
 impl Default for UserSettings {
@@ -132,6 +139,9 @@ impl Default for UserSettings {
             raw_values: 0,
             auto_detection_seconds: 0,
             event_log: false,
+            alert_sound: true,
+            alert_sound_path: String::new(),
+            alert_sound_volume: default_alert_sound_volume(),
         }
     }
 }
@@ -150,6 +160,66 @@ fn default_hide_raid_volume() -> bool {
 
 fn default_alarm_health_status() -> bool {
     true
+}
+
+fn default_alert_sound() -> bool {
+    true
+}
+
+fn default_alert_sound_volume() -> u8 {
+    80
+}
+
+fn play_alert_sound(custom_path: &str, volume: u8, urgency: &str) {
+    if volume == 0 {
+        return;
+    }
+    let volume = volume.min(100);
+    let warning = urgency == "critical";
+    let sound_id = if warning {
+        "dialog-warning"
+    } else {
+        "dialog-information"
+    };
+    let default_path = format!("/usr/share/sounds/freedesktop/stereo/{sound_id}.oga");
+    let sound_path =
+        if !custom_path.trim().is_empty() && std::path::Path::new(custom_path).is_file() {
+            custom_path
+        } else {
+            &default_path
+        };
+    let pulse_volume = u32::from(volume) * 65_536 / 100;
+    if let Ok(mut child) = Command::new("paplay")
+        .arg(format!("--volume={pulse_volume}"))
+        .arg(sound_path)
+        .spawn()
+    {
+        thread::spawn(move || {
+            let success = child.wait().is_ok_and(|status| status.success());
+            if !success {
+                let _ = Command::new("canberra-gtk-play")
+                    .arg(format!("--id={sound_id}"))
+                    .arg(format!(
+                        "--volume={:.1}",
+                        20.0 * f64::from(volume).log10() - 40.0
+                    ))
+                    .status();
+            }
+        });
+    } else {
+        if let Ok(mut child) = Command::new("canberra-gtk-play")
+            .arg(format!("--id={sound_id}"))
+            .arg(format!(
+                "--volume={:.1}",
+                20.0 * f64::from(volume).log10() - 40.0
+            ))
+            .spawn()
+        {
+            thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+    }
 }
 
 fn event_log_path() -> std::path::PathBuf {
@@ -342,6 +412,7 @@ impl DiskInfoApp {
             settings,
             temperature_dialog: false,
             health_dialog: false,
+            sound_dialog: false,
             settings_drive: String::new(),
             temperature_draft: 50,
             health_draft: HealthThresholds::default(),
@@ -541,10 +612,18 @@ impl DiskInfoApp {
                 if self.settings.event_log {
                     append_event_log(drive, &messages, urgency);
                 }
+                if self.settings.alert_sound {
+                    play_alert_sound(
+                        &self.settings.alert_sound_path,
+                        self.settings.alert_sound_volume,
+                        urgency,
+                    );
+                }
                 if let Ok(mut child) = Command::new("notify-send")
                     .arg("--app-name=Viper Disk Info")
                     .arg(format!("--urgency={urgency}"))
                     .arg("--expire-time=10000")
+                    .arg("--hint=boolean:suppress-sound:true")
                     .arg(title)
                     .arg(body)
                     .spawn()
@@ -717,6 +796,7 @@ impl eframe::App for DiskInfoApp {
             }
         }
         self.settings_windows(&context);
+        self.sound_settings_window(&context);
         self.save_text_window(&context);
         self.save_image_window(&context);
 
@@ -844,6 +924,16 @@ impl DiskInfoApp {
                         .changed()
                     {
                         save_settings(&self.settings);
+                    }
+                    if ui
+                        .checkbox(&mut self.settings.alert_sound, "Alert Sound")
+                        .changed()
+                    {
+                        save_settings(&self.settings);
+                    }
+                    if ui.button("Sound Settings...").clicked() {
+                        self.sound_dialog = true;
+                        ui.close();
                     }
                 });
                 ui.separator();
@@ -1184,6 +1274,53 @@ impl DiskInfoApp {
                 });
             self.health_dialog = open;
         }
+    }
+
+    fn sound_settings_window(&mut self, context: &egui::Context) {
+        if !self.sound_dialog {
+            return;
+        }
+        let mut open = self.sound_dialog;
+        egui::Window::new("Sound Settings")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(context, |ui| {
+                ui.label("Leave the sound file empty to use the desktop alert sounds.");
+                ui.horizontal(|ui| {
+                    ui.label("Sound file");
+                    if ui
+                        .text_edit_singleline(&mut self.settings.alert_sound_path)
+                        .changed()
+                    {
+                        save_settings(&self.settings);
+                    }
+                });
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.settings.alert_sound_volume, 0..=100)
+                            .text("Volume"),
+                    )
+                    .changed()
+                {
+                    save_settings(&self.settings);
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Test").clicked() {
+                        play_alert_sound(
+                            &self.settings.alert_sound_path,
+                            self.settings.alert_sound_volume,
+                            "critical",
+                        );
+                    }
+                    if ui.button("Default").clicked() {
+                        self.settings.alert_sound_path.clear();
+                        self.settings.alert_sound_volume = default_alert_sound_volume();
+                        save_settings(&self.settings);
+                    }
+                });
+            });
+        self.sound_dialog = open;
     }
 
     fn drive_tabs(&mut self, ui: &mut egui::Ui) {
