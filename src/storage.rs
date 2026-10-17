@@ -32,6 +32,7 @@ pub type DeviceSignature = Vec<(String, String, u64)>;
 
 #[derive(Clone, Debug)]
 pub struct Metric {
+    pub id: u8,
     pub name: String,
     pub value: String,
 }
@@ -287,49 +288,86 @@ fn merge_smart(drive: &mut Drive, result: SmartctlEnvelope) {
             .map(|used| 100u8.saturating_sub(used.min(100)));
         let metrics = [
             (
+                0x01,
+                "Critical warning",
+                nvme.critical_warning.map(|value| format!("0x{value:02X}")),
+            ),
+            (
+                0x02,
+                "Temperature",
+                nvme.temperature.map(|value| format!("{value} °C")),
+            ),
+            (
+                0x03,
                 "Available spare",
                 nvme.available_spare.map(|v| format!("{v}%")),
             ),
             (
+                0x04,
                 "Available spare threshold",
                 nvme.available_spare_threshold.map(|v| format!("{v}%")),
             ),
             (
+                0x05,
                 "Percentage used",
                 nvme.percentage_used.map(|v| format!("{v}%")),
             ),
             (
+                0x06,
                 "Data units read",
                 nvme.data_units_read.map(|v| v.to_string()),
             ),
             (
+                0x07,
                 "Data units written",
                 nvme.data_units_written.map(|v| v.to_string()),
             ),
-            ("Host read commands", nvme.host_reads.map(|v| v.to_string())),
             (
+                0x08,
+                "Host read commands",
+                nvme.host_reads.map(|v| v.to_string()),
+            ),
+            (
+                0x09,
                 "Host write commands",
                 nvme.host_writes.map(|v| v.to_string()),
             ),
             (
+                0x0A,
                 "Controller busy time",
                 nvme.controller_busy_time.map(|v| format!("{v} minutes")),
             ),
-            ("Power cycles", nvme.power_cycles.map(|v| v.to_string())),
             (
+                0x0B,
+                "Power cycles",
+                nvme.power_cycles.map(|v| v.to_string()),
+            ),
+            (
+                0x0C,
+                "Power on hours",
+                nvme.power_on_hours.map(|v| format!("{v} hours")),
+            ),
+            (
+                0x0D,
                 "Unsafe shutdowns",
                 nvme.unsafe_shutdowns.map(|v| v.to_string()),
             ),
-            ("Media errors", nvme.media_errors.map(|v| v.to_string())),
             (
+                0x0E,
+                "Media errors",
+                nvme.media_errors.map(|v| v.to_string()),
+            ),
+            (
+                0x0F,
                 "Error log entries",
                 nvme.num_err_log_entries.map(|v| v.to_string()),
             ),
         ];
         drive
             .nvme_metrics
-            .extend(metrics.into_iter().filter_map(|(name, value)| {
+            .extend(metrics.into_iter().filter_map(|(id, name, value)| {
                 value.map(|value| Metric {
+                    id,
                     name: name.into(),
                     value,
                 })

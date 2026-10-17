@@ -2092,7 +2092,7 @@ fn drive_view(
                 ata_attribute_table(ui, drive, settings, raw_format);
             } else if !drive.nvme_metrics.is_empty() {
                 ui.label(RichText::new("NVMe S.M.A.R.T.").strong().size(12.0));
-                nvme_table(ui, drive);
+                nvme_table(ui, drive, settings, green_mode);
             } else {
                 ui.label(
                     RichText::new(
@@ -2258,7 +2258,7 @@ fn format_raw(attribute: &storage::AtaSmartAttribute, format: RawFormat) -> Stri
     }
 }
 
-fn nvme_table(ui: &mut egui::Ui, drive: &Drive) {
+fn nvme_table(ui: &mut egui::Ui, drive: &Drive, settings: &DriveSettings, green_mode: bool) {
     Grid::new("nvme_smart_table")
         .num_columns(4)
         .spacing(Vec2::new(10.0, 3.0))
@@ -2269,20 +2269,79 @@ fn nvme_table(ui: &mut egui::Ui, drive: &Drive) {
             }
             ui.end_row();
             for metric in &drive.nvme_metrics {
-                let (label, color) = if drive.smart_status == Some(false) {
-                    ("BAD", Color32::from_rgb(234, 77, 77))
-                } else if drive.smart_status == Some(true) {
-                    ("GOOD", Color32::from_rgb(63, 184, 107))
-                } else {
-                    ("UNKNOWN", Color32::GRAY)
-                };
+                let (label, color) = nvme_metric_status(drive, metric, settings, green_mode);
                 ui.colored_label(color, label);
-                ui.label("");
+                ui.label(format!("{:02X}", metric.id));
                 ui.label(&metric.name);
                 ui.label(&metric.value);
                 ui.end_row();
             }
         });
+}
+
+fn nvme_metric_status(
+    drive: &Drive,
+    metric: &storage::Metric,
+    settings: &DriveSettings,
+    green_mode: bool,
+) -> (&'static str, Color32) {
+    let unknown = ("UNKNOWN", Color32::GRAY);
+    let good = (
+        "GOOD",
+        if green_mode {
+            Color32::from_rgb(87, 205, 95)
+        } else {
+            Color32::from_rgb(63, 184, 107)
+        },
+    );
+    let caution = ("CAUTION", Color32::from_rgb(224, 170, 55));
+    let bad = ("BAD", Color32::from_rgb(234, 77, 77));
+
+    let model = drive.model.to_ascii_lowercase();
+    if ["parallels", "vmware", "qemu"]
+        .iter()
+        .any(|virtualizer| model.starts_with(virtualizer))
+    {
+        return unknown;
+    }
+
+    match metric.id {
+        0x01 => match drive.nvme_critical_warning {
+            Some(0) => good,
+            Some(_) => bad,
+            None => unknown,
+        },
+        0x02 => match drive.temperature_c {
+            Some(temperature) if settings.temperature_alarm > 0 => {
+                if temperature >= i64::from(settings.temperature_alarm) {
+                    bad
+                } else {
+                    good
+                }
+            }
+            Some(_) => good,
+            None => unknown,
+        },
+        0x03 => match (
+            drive.nvme_available_spare,
+            drive.nvme_available_spare_threshold,
+        ) {
+            (Some(spare), Some(threshold)) if threshold > 100 || (spare == 0 && threshold == 0) => {
+                good
+            }
+            (Some(spare), Some(threshold)) if spare < threshold => bad,
+            (Some(spare), Some(threshold)) if spare == threshold && threshold != 100 => caution,
+            (Some(_), Some(_)) => good,
+            _ => unknown,
+        },
+        0x05 => match drive.health_percent {
+            Some(life) if i32::from(life) <= settings.threshold_ff => caution,
+            Some(_) => good,
+            None => unknown,
+        },
+        _ if drive.smart_available => good,
+        _ => unknown,
+    }
 }
 
 fn is_normalized_health_attribute(id: u8) -> bool {
