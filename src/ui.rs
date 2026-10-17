@@ -55,6 +55,14 @@ struct UserSettings {
     dark_theme: bool,
     #[serde(default)]
     green_mode: bool,
+    #[serde(default)]
+    dump_identify: bool,
+    #[serde(default)]
+    dump_smart_data: bool,
+    #[serde(default)]
+    dump_smart_threshold: bool,
+    #[serde(default)]
+    ascii_view: bool,
 }
 
 impl Default for UserSettings {
@@ -65,6 +73,10 @@ impl Default for UserSettings {
             fahrenheit: false,
             dark_theme: true,
             green_mode: false,
+            dump_identify: false,
+            dump_smart_data: false,
+            dump_smart_threshold: false,
+            ascii_view: false,
         }
     }
 }
@@ -369,6 +381,28 @@ impl DiskInfoApp {
                     context.copy_text(self.report_text());
                     ui.close();
                 }
+                ui.menu_button("Options", |ui| {
+                    let mut changed = false;
+                    changed |= ui
+                        .checkbox(&mut self.settings.dump_identify, "IDENTIFY_DEVICE")
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut self.settings.dump_smart_data, "SMART_READ_DATA")
+                        .changed();
+                    changed |= ui
+                        .checkbox(
+                            &mut self.settings.dump_smart_threshold,
+                            "SMART_READ_THRESHOLD",
+                        )
+                        .changed();
+                    ui.separator();
+                    changed |= ui
+                        .checkbox(&mut self.settings.ascii_view, "ASCII View")
+                        .changed();
+                    if changed {
+                        save_settings(&self.settings);
+                    }
+                });
                 if ui
                     .checkbox(&mut self.hide_serial, "Hide serial number")
                     .changed()
@@ -802,6 +836,50 @@ impl DiskInfoApp {
                     attribute.raw,
                 );
             }
+            if self.settings.dump_identify {
+                report.push_str("\n-- IDENTIFY_DEVICE ---------------------------------------------------------\n");
+                if self.hide_serial {
+                    report.push_str(
+                        "Raw IDENTIFY output omitted while serial number hiding is enabled.\n",
+                    );
+                } else {
+                    report.push_str(&smartctl_output(
+                        &drive.name,
+                        &["-r", "ataioctl,2", "-i"],
+                        self.settings.ascii_view,
+                    ));
+                }
+            }
+            if self.settings.dump_smart_data
+                || (self.settings.dump_smart_threshold && !drive.kind.eq_ignore_ascii_case("NVMe"))
+            {
+                let trace = if drive.kind.eq_ignore_ascii_case("NVMe") {
+                    "nvmeioctl,2"
+                } else {
+                    "ataioctl,2"
+                };
+                let dump =
+                    smartctl_output(&drive.name, &["-r", trace, "-A"], self.settings.ascii_view);
+                let data_enabled = self.settings.dump_smart_data;
+                let threshold_enabled =
+                    self.settings.dump_smart_threshold && !drive.kind.eq_ignore_ascii_case("NVMe");
+                match (data_enabled, threshold_enabled) {
+                    (true, true) => {
+                        report.push_str("\n-- SMART_READ_DATA + SMART_READ_THRESHOLD -------------------------------\n");
+                        report.push_str("smartctl returns both reads together for this device.\n");
+                        report.push_str(&dump);
+                    }
+                    (true, false) => {
+                        report.push_str("\n-- SMART_READ_DATA ---------------------------------------------------------\n");
+                        report.push_str(&dump);
+                    }
+                    (false, true) => {
+                        report.push_str("\n-- SMART_READ_THRESHOLD ----------------------------------------------------\n");
+                        report.push_str(&dump);
+                    }
+                    (false, false) => {}
+                }
+            }
             if !drive.nvme_metrics.is_empty() {
                 report.push_str("\n-- NVMe S.M.A.R.T. ---------------------------------------------------------\n");
                 for metric in &drive.nvme_metrics {
@@ -853,6 +931,70 @@ impl DiskInfoApp {
             });
         self.save_text_dialog = open && self.save_text_dialog;
     }
+}
+
+fn smartctl_output(device: &str, args: &[&str], ascii_view: bool) -> String {
+    let path = format!("/dev/{device}");
+    match std::process::Command::new("smartctl")
+        .args(args)
+        .arg(path)
+        .output()
+    {
+        Ok(output) => {
+            let text = if output.stdout.is_empty() {
+                String::from_utf8_lossy(&output.stderr).into_owned()
+            } else {
+                String::from_utf8_lossy(&output.stdout).into_owned()
+            };
+            if text.is_empty() {
+                format!(
+                    "smartctl returned no output (exit status {}).\n",
+                    output.status
+                )
+            } else if ascii_view {
+                append_ascii_columns(&text)
+            } else {
+                text
+            }
+        }
+        Err(error) => format!("Could not run smartctl: {error}\n"),
+    }
+}
+
+fn append_ascii_columns(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    for line in text.lines() {
+        output.push_str(line);
+        if let Some((offset, bytes)) = line.split_once(':')
+            && offset
+                .trim()
+                .trim_start_matches("0x")
+                .chars()
+                .all(|ch| ch.is_ascii_hexdigit())
+        {
+            let decoded = bytes
+                .split_whitespace()
+                .filter_map(|part| {
+                    let byte = part.strip_prefix("0x").unwrap_or(part);
+                    (byte.len() == 2)
+                        .then(|| u8::from_str_radix(byte, 16).ok())
+                        .flatten()
+                })
+                .collect::<Vec<_>>();
+            if decoded.len() >= 8 {
+                output.push_str("  ");
+                for byte in decoded {
+                    output.push(if byte.is_ascii_graphic() {
+                        byte as char
+                    } else {
+                        '.'
+                    });
+                }
+            }
+        }
+        output.push('\n');
+    }
+    output
 }
 
 fn drive_view(
