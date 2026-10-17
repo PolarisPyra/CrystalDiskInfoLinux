@@ -110,6 +110,10 @@ struct NvmeHealth {
     warning_temp_time: Option<u64>,
     critical_comp_time: Option<u64>,
     temperature_sensors: Option<Vec<Option<i64>>>,
+    thermal_temp1_transition_count: Option<u64>,
+    thermal_temp2_transition_count: Option<u64>,
+    thermal_temp1_total_time: Option<u64>,
+    thermal_temp2_total_time: Option<u64>,
 }
 #[derive(Deserialize)]
 struct AtaAttributes {
@@ -234,7 +238,33 @@ fn read_smartctl(device: &str) -> Option<SmartctlEnvelope> {
         .ok()?;
     // smartctl uses a nonzero status to report SMART warnings and health failures;
     // JSON remains useful, so decode stdout regardless of the exit code.
-    serde_json::from_slice(&output.stdout).ok()
+    let mut envelope: SmartctlEnvelope = serde_json::from_slice(&output.stdout).ok()?;
+    if envelope.data.nvme_smart_health_information_log.is_some() {
+        if let Ok(output) = Command::new("smartctl").args(["-x", &path]).output() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            if let Some(nvme) = envelope.data.nvme_smart_health_information_log.as_mut() {
+                nvme.thermal_temp1_transition_count =
+                    smartctl_nvme_value(&text, "Thermal Temp. 1 Transition Count");
+                nvme.thermal_temp2_transition_count =
+                    smartctl_nvme_value(&text, "Thermal Temp. 2 Transition Count");
+                nvme.thermal_temp1_total_time =
+                    smartctl_nvme_value(&text, "Thermal Temp. 1 Total Time");
+                nvme.thermal_temp2_total_time =
+                    smartctl_nvme_value(&text, "Thermal Temp. 2 Total Time");
+            }
+        }
+    }
+    Some(envelope)
+}
+
+fn smartctl_nvme_value(output: &str, label: &str) -> Option<u64> {
+    output.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case(label)
+            .then(|| value.trim().replace(',', "").parse().ok())
+            .flatten()
+    })
 }
 
 fn merge_smart(drive: &mut Drive, result: SmartctlEnvelope) {
@@ -409,6 +439,36 @@ fn merge_smart(drive: &mut Drive, result: SmartctlEnvelope) {
                             })
                     },
                 ));
+        }
+        for (id, name, value) in [
+            (
+                0x1A,
+                "Thermal temperature 1 transition count",
+                nvme.thermal_temp1_transition_count,
+            ),
+            (
+                0x1B,
+                "Thermal temperature 2 transition count",
+                nvme.thermal_temp2_transition_count,
+            ),
+            (
+                0x1C,
+                "Thermal temperature 1 total time",
+                nvme.thermal_temp1_total_time,
+            ),
+            (
+                0x1D,
+                "Thermal temperature 2 total time",
+                nvme.thermal_temp2_total_time,
+            ),
+        ] {
+            if let Some(value) = value {
+                drive.nvme_metrics.push(Metric {
+                    id,
+                    name: name.into(),
+                    value: value.to_string(),
+                });
+            }
         }
     }
     if let Some(attributes) = data.ata_smart_attributes.and_then(|v| v.table) {
