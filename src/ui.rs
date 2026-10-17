@@ -2013,7 +2013,12 @@ fn drive_view(
                 egui::Label::new(RichText::new(&drive.model).strong().size(16.0))
                     .truncate()
                     .selectable(false),
-            );
+            )
+            .on_hover_text(format!(
+                "{} : {}",
+                drive.model,
+                source_capacity(drive.capacity)
+            ));
             if ui
                 .add_sized(Vec2::new(28.0, 24.0), egui::Button::new("›"))
                 .clicked()
@@ -2204,6 +2209,17 @@ fn power_on_duration_tooltip(total_hours: u64) -> String {
         format!("{years} years {days} days {hours} hours")
     } else {
         format!("{days} days {hours} hours")
+    }
+}
+
+fn source_capacity(bytes: u64) -> String {
+    let megabytes = bytes / 1_000_000;
+    if megabytes >= 1000 {
+        format!("{:.1} GB", megabytes as f64 / 1000.0)
+    } else if megabytes > 0 {
+        format!("{megabytes} MB")
+    } else {
+        "Unknown".into()
     }
 }
 
