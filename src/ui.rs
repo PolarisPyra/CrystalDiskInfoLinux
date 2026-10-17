@@ -2137,8 +2137,36 @@ fn metadata_column(ui: &mut egui::Ui, drive: &Drive, hide_serial: bool) {
             metadata(ui, "Transfer Mode", option(&drive.transfer_mode));
             metadata(ui, "Drive Letter", &drive.drive_map.join(", "));
             metadata(ui, "Standard", &drive.kind);
-            metadata(ui, "Feature", "Unavailable");
+            let features = if drive.features.is_empty() {
+                "Unavailable".to_owned()
+            } else {
+                drive.features.join(", ")
+            };
+            metadata_with_tooltip(ui, "Feature", &features, feature_tooltip(&drive.features));
         });
+}
+
+fn feature_tooltip(features: &[String]) -> Option<String> {
+    let descriptions = [
+        (
+            "S.M.A.R.T.",
+            "Self-Monitoring, Analysis and Reporting Technology",
+        ),
+        ("APM", "Advanced Power Management"),
+        ("AAM", "Automatic Acoustic Management"),
+        ("NCQ", "Native Command Queuing"),
+        ("TRIM", "Trim function of DATA SET MANAGEMENT command"),
+        ("DevSleep", "Device Sleep"),
+        ("Streaming", "Streaming Feature Set"),
+        ("GPL", "General Purpose Logging"),
+        ("VolatileWriteCache", "Volatile Write Cache Present"),
+    ];
+    let lines = descriptions
+        .into_iter()
+        .filter(|(feature, _)| features.iter().any(|value| value == feature))
+        .map(|(feature, description)| format!("{feature}: {description}"))
+        .collect::<Vec<_>>();
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 fn metadata_column_secondary(ui: &mut egui::Ui, drive: &Drive) {

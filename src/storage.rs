@@ -16,6 +16,10 @@ pub struct Drive {
     pub power_cycles: Option<u64>,
     pub host_reads_gb: Option<u64>,
     pub host_writes_gb: Option<u64>,
+    pub features: Vec<String>,
+    pub ncq_supported: bool,
+    pub trim_supported: bool,
+    pub volatile_write_cache: bool,
     pub temperature_c: Option<i64>,
     pub power_on_hours: Option<u64>,
     pub health_percent: Option<u8>,
@@ -66,6 +70,10 @@ struct SmartctlOutput {
     smart_status: Option<SmartStatus>,
     nvme_smart_health_information_log: Option<NvmeHealth>,
     ata_smart_attributes: Option<AtaAttributes>,
+    trim: Option<TrimSupport>,
+    ata_apm: Option<FeatureSetting>,
+    ata_aam: Option<FeatureSetting>,
+    ata_smart_data: Option<AtaSmartData>,
 }
 
 #[derive(Deserialize)]
@@ -91,6 +99,20 @@ struct PowerOnTime {
 #[derive(Deserialize)]
 struct SmartStatus {
     passed: Option<bool>,
+}
+#[derive(Deserialize)]
+struct TrimSupport {
+    supported: Option<bool>,
+}
+#[derive(Deserialize)]
+struct FeatureSetting {}
+#[derive(Deserialize)]
+struct AtaSmartData {
+    capabilities: Option<AtaSmartCapabilities>,
+}
+#[derive(Deserialize)]
+struct AtaSmartCapabilities {
+    gp_logging_supported: Option<bool>,
 }
 #[derive(Deserialize)]
 struct NvmeHealth {
@@ -167,6 +189,12 @@ pub fn discover() -> Vec<Drive> {
                 model,
                 kind: kind.into(),
                 capacity: bytes,
+                ncq_supported: read_u64(root.join("device/queue_depth"))
+                    .is_some_and(|depth| depth > 1),
+                trim_supported: read_u64(root.join("queue/discard_max_bytes"))
+                    .is_some_and(|bytes| bytes > 0),
+                volatile_write_cache: read_trimmed(root.join("queue/write_cache"))
+                    .is_some_and(|mode| mode.eq_ignore_ascii_case("write back")),
                 ..Drive::default()
             };
             drive.drive_map = mounted_paths(&name);
@@ -225,6 +253,7 @@ struct DeviceInfo {
 struct SmartctlInfo {
     exit_status: Option<i32>,
     messages: Option<Vec<SmartctlMessage>>,
+    output: Option<Vec<String>>,
 }
 #[derive(Deserialize)]
 struct SmartctlMessage {
@@ -235,25 +264,37 @@ struct SmartctlMessage {
 fn read_smartctl(device: &str) -> Option<SmartctlEnvelope> {
     let path = format!("/dev/{device}");
     let output = Command::new("smartctl")
-        .args(["-a", "-j", &path])
+        .args(["-x", "--json=o", &path])
         .output()
         .ok()?;
     // smartctl uses a nonzero status to report SMART warnings and health failures;
     // JSON remains useful, so decode stdout regardless of the exit code.
-    let mut envelope: SmartctlEnvelope = serde_json::from_slice(&output.stdout).ok()?;
-    if envelope.data.nvme_smart_health_information_log.is_some() {
-        if let Ok(output) = Command::new("smartctl").args(["-x", &path]).output() {
-            let text = String::from_utf8_lossy(&output.stdout);
-            if let Some(nvme) = envelope.data.nvme_smart_health_information_log.as_mut() {
-                nvme.thermal_temp1_transition_count =
-                    smartctl_nvme_value(&text, "Thermal Temp. 1 Transition Count");
-                nvme.thermal_temp2_transition_count =
-                    smartctl_nvme_value(&text, "Thermal Temp. 2 Transition Count");
-                nvme.thermal_temp1_total_time =
-                    smartctl_nvme_value(&text, "Thermal Temp. 1 Total Time");
-                nvme.thermal_temp2_total_time =
-                    smartctl_nvme_value(&text, "Thermal Temp. 2 Total Time");
-            }
+    let mut envelope =
+        if let Ok(envelope) = serde_json::from_slice::<SmartctlEnvelope>(&output.stdout) {
+            envelope
+        } else {
+            let fallback = Command::new("smartctl")
+                .args(["-a", "-j", &path])
+                .output()
+                .ok()?;
+            serde_json::from_slice(&fallback.stdout).ok()?
+        };
+    let text = envelope
+        .smartctl
+        .as_ref()
+        .and_then(|smartctl| smartctl.output.as_ref())
+        .map(|lines| lines.join("\n"))
+        .unwrap_or_default();
+    if envelope.data.nvme_smart_health_information_log.is_some() && !text.is_empty() {
+        if let Some(nvme) = envelope.data.nvme_smart_health_information_log.as_mut() {
+            nvme.thermal_temp1_transition_count =
+                smartctl_nvme_value(&text, "Thermal Temp. 1 Transition Count");
+            nvme.thermal_temp2_transition_count =
+                smartctl_nvme_value(&text, "Thermal Temp. 2 Transition Count");
+            nvme.thermal_temp1_total_time =
+                smartctl_nvme_value(&text, "Thermal Temp. 1 Total Time");
+            nvme.thermal_temp2_total_time =
+                smartctl_nvme_value(&text, "Thermal Temp. 2 Total Time");
         }
     }
     Some(envelope)
@@ -271,6 +312,22 @@ fn smartctl_nvme_value(output: &str, label: &str) -> Option<u64> {
 
 fn merge_smart(drive: &mut Drive, result: SmartctlEnvelope) {
     let data = result.data;
+    let is_nvme = data.nvme_smart_health_information_log.is_some();
+    let is_ata = data.ata_version.is_some();
+    let supports_apm = data.ata_apm.is_some();
+    let supports_aam = data.ata_aam.is_some();
+    let supports_trim = data
+        .trim
+        .as_ref()
+        .and_then(|trim| trim.supported)
+        .unwrap_or(false);
+    let supports_gpl = data
+        .ata_smart_data
+        .as_ref()
+        .and_then(|smart| smart.capabilities.as_ref())
+        .and_then(|capabilities| capabilities.gp_logging_supported)
+        .unwrap_or(false);
+    drive.trim_supported |= supports_trim;
     drive.model = data
         .model_name
         .or(data.model_family)
@@ -521,6 +578,34 @@ fn merge_smart(drive: &mut Drive, result: SmartctlEnvelope) {
         }));
     }
     drive.smart_available = !drive.ata_attributes.is_empty() || has_nvme_smart_data;
+    drive.features.clear();
+    if drive.smart_available {
+        drive.features.push("S.M.A.R.T.".into());
+    }
+    if is_nvme {
+        if drive.trim_supported {
+            drive.features.push("TRIM".into());
+        }
+        if drive.volatile_write_cache {
+            drive.features.push("VolatileWriteCache".into());
+        }
+    } else if is_ata {
+        if supports_apm {
+            drive.features.push("APM".into());
+        }
+        if supports_aam {
+            drive.features.push("AAM".into());
+        }
+        if drive.ncq_supported {
+            drive.features.push("NCQ".into());
+        }
+        if drive.trim_supported {
+            drive.features.push("TRIM".into());
+        }
+        if supports_gpl {
+            drive.features.push("GPL".into());
+        }
+    }
     drive.assessment = match drive.smart_status {
         Some(true) => "Good".into(),
         Some(false) => "Warning".into(),
