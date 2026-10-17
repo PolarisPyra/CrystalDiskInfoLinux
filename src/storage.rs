@@ -64,6 +64,7 @@ struct AtaAttribute {
 #[derive(Deserialize)]
 struct RawValue {
     value: Option<u64>,
+    string: Option<String>,
 }
 
 pub fn discover() -> Vec<Drive> {
@@ -165,14 +166,19 @@ fn merge_smart(drive: &mut Drive, result: SmartctlEnvelope) {
     }
     if let Some(attributes) = data.ata_smart_attributes.and_then(|v| v.table) {
         for attribute in attributes {
-            let value = attribute.raw.and_then(|raw| raw.value);
+            let raw = attribute.raw;
+            let value = raw.as_ref().and_then(|raw| raw.value);
             match attribute.id {
                 Some(9) => drive.power_on_hours = value.or(drive.power_on_hours),
                 Some(194 | 190) => {
-                    drive.temperature_c = value.map(|v| (v & 0xff) as i64).or(drive.temperature_c)
-                }
-                Some(202) => {
-                    drive.health_percent = value.map(|v| v.min(100) as u8).or(drive.health_percent)
+                    let parsed = raw
+                        .as_ref()
+                        .and_then(|raw| raw.string.as_deref())
+                        .and_then(|text| text.split_whitespace().next())
+                        .and_then(|text| text.parse::<i64>().ok());
+                    drive.temperature_c = parsed
+                        .or_else(|| value.map(|v| (v & 0xff) as i64))
+                        .or(drive.temperature_c);
                 }
                 _ => {}
             }
