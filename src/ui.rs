@@ -3,6 +3,7 @@ use eframe::egui::{
     self, Align, Align2, Color32, FontId, Grid, Layout, Pos2, RichText, ScrollArea, Stroke,
     StrokeKind, Vec2,
 };
+use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt::Write as _, sync::mpsc, thread, time::Duration};
 
 pub const MAIN_WINDOW_WIDTH: f32 = 1014.0;
@@ -32,6 +33,87 @@ pub struct DiskInfoApp {
     last_scan_time: f64,
     graph_open: bool,
     temperature_history: HashMap<String, Vec<(f64, f32)>>,
+    settings: UserSettings,
+    temperature_dialog: bool,
+    health_dialog: bool,
+    settings_drive: String,
+    temperature_draft: i32,
+    health_draft: HealthThresholds,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct UserSettings {
+    drives: HashMap<String, DriveSettings>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct DriveSettings {
+    temperature_alarm: i32,
+    threshold_05: i32,
+    threshold_c5: i32,
+    threshold_c6: i32,
+    threshold_ff: i32,
+}
+
+#[derive(Clone, Debug)]
+struct HealthThresholds {
+    threshold_05: i32,
+    threshold_c5: i32,
+    threshold_c6: i32,
+    threshold_ff: i32,
+}
+
+impl Default for HealthThresholds {
+    fn default() -> Self {
+        Self {
+            threshold_05: 1,
+            threshold_c5: 1,
+            threshold_c6: 1,
+            threshold_ff: 10,
+        }
+    }
+}
+
+impl DriveSettings {
+    fn defaults(drive: &Drive) -> Self {
+        let ssd = drive
+            .rotation_rate
+            .as_deref()
+            .is_some_and(|rate| rate == "SSD" || rate == "0");
+        Self {
+            temperature_alarm: if ssd { 60 } else { 50 },
+            threshold_05: 1,
+            threshold_c5: 1,
+            threshold_c6: 1,
+            threshold_ff: 10,
+        }
+    }
+}
+
+fn settings_path() -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    base.join("crystaldiskinfo-linux").join("settings.json")
+}
+
+fn load_settings() -> UserSettings {
+    std::fs::read(settings_path())
+        .ok()
+        .and_then(|data| serde_json::from_slice(&data).ok())
+        .unwrap_or_default()
+}
+
+fn save_settings(settings: &UserSettings) {
+    let path = settings_path();
+    if let (Some(parent), Ok(data)) = (path.parent(), serde_json::to_vec_pretty(settings)) {
+        if std::fs::create_dir_all(parent).is_ok() {
+            let _ = std::fs::write(path, data);
+        }
+    }
 }
 
 impl DiskInfoApp {
@@ -52,6 +134,12 @@ impl DiskInfoApp {
             last_scan_time: 0.0,
             graph_open: false,
             temperature_history: HashMap::new(),
+            settings: load_settings(),
+            temperature_dialog: false,
+            health_dialog: false,
+            settings_drive: String::new(),
+            temperature_draft: 50,
+            health_draft: HealthThresholds::default(),
         };
         app.start_scan(context.egui_ctx.clone());
         app
@@ -201,6 +289,7 @@ impl eframe::App for DiskInfoApp {
                     });
             }
         }
+        self.settings_windows(&context);
     }
 }
 
@@ -253,6 +342,16 @@ impl DiskInfoApp {
                     }
                 });
                 ui.separator();
+                if ui.button("Temperature Setting").clicked() {
+                    self.begin_settings();
+                    self.temperature_dialog = true;
+                    ui.close();
+                }
+                if ui.button("Health Status Setting").clicked() {
+                    self.begin_settings();
+                    self.health_dialog = true;
+                    ui.close();
+                }
                 if ui.button("Graph").clicked() {
                     self.graph_open = true;
                     ui.close();
@@ -309,6 +408,189 @@ impl DiskInfoApp {
                 ui.label("Scanning");
             }
         });
+    }
+
+    fn begin_settings(&mut self) {
+        let Some(drive) = self.current_drive().cloned() else {
+            return;
+        };
+        self.settings_drive = drive.name.clone();
+        let settings = self
+            .settings
+            .drives
+            .get(&drive.name)
+            .cloned()
+            .unwrap_or_else(|| DriveSettings::defaults(&drive));
+        self.temperature_draft = settings.temperature_alarm;
+        self.health_draft = HealthThresholds {
+            threshold_05: settings.threshold_05,
+            threshold_c5: settings.threshold_c5,
+            threshold_c6: settings.threshold_c6,
+            threshold_ff: settings.threshold_ff,
+        };
+    }
+
+    fn settings_windows(&mut self, context: &egui::Context) {
+        let drive_index = self
+            .drives
+            .iter()
+            .position(|drive| drive.name == self.settings_drive);
+        if self.temperature_dialog {
+            let mut open = self.temperature_dialog;
+            egui::Window::new("Temperature Setting")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .show(context, |ui| {
+                    if let Some(index) = drive_index {
+                        egui::ComboBox::from_label("Drive")
+                            .selected_text(format!(
+                                "{} ({})",
+                                self.drives[index].model, self.drives[index].name
+                            ))
+                            .show_ui(ui, |ui| {
+                                for drive in &self.drives {
+                                    if ui
+                                        .selectable_label(
+                                            drive.name == self.settings_drive,
+                                            format!("{} ({})", drive.model, drive.name),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.settings_drive = drive.name.clone();
+                                        let saved = self
+                                            .settings
+                                            .drives
+                                            .get(&drive.name)
+                                            .cloned()
+                                            .unwrap_or_else(|| DriveSettings::defaults(drive));
+                                        self.temperature_draft = saved.temperature_alarm;
+                                    }
+                                }
+                            });
+                        ui.horizontal(|ui| {
+                            ui.label("Alarm temperature");
+                            ui.add(
+                                egui::Slider::new(&mut self.temperature_draft, 10..=90)
+                                    .suffix(" °C"),
+                            );
+                        });
+                        ui.label(format!(
+                            "{} °C / {} °F",
+                            self.temperature_draft,
+                            self.temperature_draft * 9 / 5 + 32
+                        ));
+                        ui.horizontal(|ui| {
+                            if ui.button("Default").clicked() {
+                                self.temperature_draft =
+                                    DriveSettings::defaults(&self.drives[index]).temperature_alarm;
+                            }
+                            if ui.button("Apply").clicked() {
+                                let drive = &self.drives[index];
+                                let entry = self
+                                    .settings
+                                    .drives
+                                    .entry(drive.name.clone())
+                                    .or_insert_with(|| DriveSettings::defaults(drive));
+                                entry.temperature_alarm = self.temperature_draft;
+                                save_settings(&self.settings);
+                            }
+                        });
+                    } else {
+                        ui.label("No drive selected.");
+                    }
+                });
+            self.temperature_dialog = open;
+        }
+        if self.health_dialog {
+            let mut open = self.health_dialog;
+            egui::Window::new("Health Status Setting")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .show(context, |ui| {
+                    if let Some(index) = drive_index {
+                        egui::ComboBox::from_label("Drive")
+                            .selected_text(format!(
+                                "{} ({})",
+                                self.drives[index].model, self.drives[index].name
+                            ))
+                            .show_ui(ui, |ui| {
+                                for drive in &self.drives {
+                                    if ui
+                                        .selectable_label(
+                                            drive.name == self.settings_drive,
+                                            format!("{} ({})", drive.model, drive.name),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.settings_drive = drive.name.clone();
+                                        let saved = self
+                                            .settings
+                                            .drives
+                                            .get(&drive.name)
+                                            .cloned()
+                                            .unwrap_or_else(|| DriveSettings::defaults(drive));
+                                        self.health_draft = HealthThresholds {
+                                            threshold_05: saved.threshold_05,
+                                            threshold_c5: saved.threshold_c5,
+                                            threshold_c6: saved.threshold_c6,
+                                            threshold_ff: saved.threshold_ff,
+                                        };
+                                    }
+                                }
+                            });
+                        let ssd = self.drives[index]
+                            .rotation_rate
+                            .as_deref()
+                            .is_some_and(|rate| rate == "SSD" || rate == "0");
+                        if ssd {
+                            if self.drives[index].health_percent.is_some() {
+                                ui.add(
+                                    egui::Slider::new(&mut self.health_draft.threshold_ff, 0..=99)
+                                        .text("ID FF wear threshold"),
+                                );
+                            } else {
+                                ui.label("Wear threshold is unavailable for this SSD.");
+                            }
+                        } else {
+                            ui.add(
+                                egui::Slider::new(&mut self.health_draft.threshold_05, 0..=255)
+                                    .text("ID 05 threshold"),
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut self.health_draft.threshold_c5, 0..=255)
+                                    .text("ID C5 threshold"),
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut self.health_draft.threshold_c6, 0..=255)
+                                    .text("ID C6 threshold"),
+                            );
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("Default").clicked() {
+                                self.health_draft = HealthThresholds::default();
+                            }
+                            if ui.button("Apply").clicked() {
+                                let drive = &self.drives[index];
+                                let entry = self
+                                    .settings
+                                    .drives
+                                    .entry(drive.name.clone())
+                                    .or_insert_with(|| DriveSettings::defaults(drive));
+                                entry.threshold_05 = self.health_draft.threshold_05;
+                                entry.threshold_c5 = self.health_draft.threshold_c5;
+                                entry.threshold_c6 = self.health_draft.threshold_c6;
+                                entry.threshold_ff = self.health_draft.threshold_ff;
+                                save_settings(&self.settings);
+                            }
+                        });
+                    } else {
+                        ui.label("No drive selected.");
+                    }
+                });
+            self.health_dialog = open;
+        }
     }
 
     fn drive_tabs(&mut self, ui: &mut egui::Ui) {
