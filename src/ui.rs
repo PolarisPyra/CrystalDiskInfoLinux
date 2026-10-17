@@ -1,6 +1,21 @@
 use crate::storage::{self, Drive};
-use eframe::egui::{self, Align, Color32, Grid, Layout, RichText, ScrollArea, Vec2};
-use std::{sync::mpsc, thread, time::Duration};
+use eframe::egui::{
+    self, Align, Align2, Color32, FontId, Grid, Layout, Pos2, RichText, ScrollArea, Stroke,
+    StrokeKind, Vec2,
+};
+use std::{collections::HashMap, fmt::Write as _, sync::mpsc, thread, time::Duration};
+
+pub const MAIN_WINDOW_WIDTH: f32 = 1014.0;
+pub const MAIN_WINDOW_HEIGHT: f32 = 694.0;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum RawFormat {
+    #[default]
+    Hex,
+    Decimal,
+    TwoByte,
+    OneByte,
+}
 
 pub struct DiskInfoApp {
     drives: Vec<Drive>,
@@ -8,6 +23,15 @@ pub struct DiskInfoApp {
     scan_receiver: Option<mpsc::Receiver<Vec<Drive>>>,
     loading: bool,
     scan_error: Option<String>,
+    fahrenheit: bool,
+    hide_serial: bool,
+    dark_theme: bool,
+    green_mode: bool,
+    raw_format: RawFormat,
+    auto_refresh_seconds: Option<f64>,
+    last_scan_time: f64,
+    graph_open: bool,
+    temperature_history: HashMap<String, Vec<(f64, f32)>>,
 }
 
 impl DiskInfoApp {
@@ -19,6 +43,15 @@ impl DiskInfoApp {
             scan_receiver: None,
             loading: false,
             scan_error: None,
+            fahrenheit: false,
+            hide_serial: false,
+            dark_theme: true,
+            green_mode: false,
+            raw_format: RawFormat::Hex,
+            auto_refresh_seconds: None,
+            last_scan_time: 0.0,
+            graph_open: false,
+            temperature_history: HashMap::new(),
         };
         app.start_scan(context.egui_ctx.clone());
         app
@@ -44,9 +77,29 @@ impl DiskInfoApp {
         };
         match receiver.try_recv() {
             Ok(drives) => {
-                self.selected = drives.first().map(|drive| drive.name.clone());
+                let now = context.input(|input| input.time);
+                for drive in &drives {
+                    if let Some(temperature) = drive.temperature_c {
+                        let history = self
+                            .temperature_history
+                            .entry(drive.name.clone())
+                            .or_default();
+                        history.push((now, temperature as f32));
+                        if history.len() > 1440 {
+                            history.remove(0);
+                        }
+                    }
+                }
+                if self
+                    .selected
+                    .as_ref()
+                    .is_none_or(|selected| !drives.iter().any(|drive| &drive.name == selected))
+                {
+                    self.selected = drives.first().map(|drive| drive.name.clone());
+                }
                 self.drives = drives;
                 self.loading = false;
+                self.last_scan_time = context.input(|input| input.time);
             }
             Err(mpsc::TryRecvError::Empty) => {
                 self.scan_receiver = Some(receiver);
@@ -58,237 +111,662 @@ impl DiskInfoApp {
             }
         }
     }
+
+    fn current_drive(&self) -> Option<&Drive> {
+        self.drives
+            .iter()
+            .find(|drive| Some(drive.name.as_str()) == self.selected.as_deref())
+    }
+
+    fn set_interval(&mut self, seconds: Option<f64>) {
+        self.auto_refresh_seconds = seconds;
+        self.last_scan_time = 0.0;
+    }
 }
 
 impl eframe::App for DiskInfoApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let context = ui.ctx().clone();
         self.poll_scan(&context);
+        if let Some(interval) = self.auto_refresh_seconds
+            && !self.loading
+            && context.input(|input| input.time) - self.last_scan_time >= interval
+        {
+            self.start_scan(context.clone());
+        }
+        if context.input(|input| input.key_pressed(egui::Key::F5)) {
+            self.start_scan(context.clone());
+        }
+        if context.input(|input| input.key_pressed(egui::Key::F6)) {
+            self.start_scan(context.clone());
+        }
+        context.set_visuals(if self.dark_theme {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        });
 
-        egui::Panel::top("app_header")
-            .default_size(78.0)
-            .frame(egui::Frame::default().inner_margin(egui::Margin::symmetric(22, 16)))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.heading("CrystalDiskInfo");
-                        ui.label(RichText::new("Storage health monitor").weak());
-                    });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let refresh = ui.add_enabled(!self.loading, egui::Button::new("Refresh"));
-                        if refresh.clicked() {
-                            self.start_scan(context.clone());
-                        }
-                        if self.loading {
-                            ui.spinner();
-                            ui.label("Scanning drives");
-                        }
-                    });
-                });
-            });
+        egui::Panel::top("main_menu")
+            .resizable(false)
+            .default_size(28.0)
+            .frame(egui::Frame::default().inner_margin(egui::Margin::symmetric(6, 2)))
+            .show(ui, |ui| self.menu_bar(ui, &context));
 
-        egui::Panel::left("device_list")
-            .resizable(true)
-            .default_size(300.0)
-            .min_size(220.0)
-            .max_size(400.0)
-            .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(16))
-            .show(ui, |ui| {
-                ui.label(RichText::new("STORAGE DEVICES").strong().weak());
-                ui.add_space(10.0);
-                if let Some(error) = &self.scan_error {
-                    ui.colored_label(Color32::LIGHT_RED, error);
-                } else if self.drives.is_empty() && !self.loading {
-                    ui.label("No drives found.");
-                }
-                ScrollArea::vertical().show(ui, |ui| {
-                    for drive in &self.drives {
-                        let selected = self.selected.as_deref() == Some(drive.name.as_str());
-                        let status = match drive.smart_status {
-                            Some(true) => "Good",
-                            Some(false) => "Warning",
-                            None => "Unknown",
-                        };
-                        let response = ui.selectable_label(
-                            selected,
-                            format!(
-                                "{}\n{}  |  {}\n{}  |  {}",
-                                drive.model,
-                                drive.name,
-                                storage::format_capacity(drive.capacity),
-                                drive.kind,
-                                status,
-                            ),
-                        );
-                        if response.clicked() {
-                            self.selected = Some(drive.name.clone());
-                        }
-                        ui.add_space(4.0);
-                    }
-                });
-            });
+        egui::Panel::top("drive_tabs")
+            .resizable(false)
+            .default_size(50.0)
+            .frame(egui::Frame::default().inner_margin(egui::Margin::symmetric(6, 4)))
+            .show(ui, |ui| self.drive_tabs(ui));
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::central_panel(ui.style()).inner_margin(22))
+            .frame(
+                egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin::symmetric(10, 8)),
+            )
             .show(ui, |ui| {
-                if let Some(drive) = self
-                    .drives
-                    .iter()
-                    .find(|drive| Some(drive.name.as_str()) == self.selected.as_deref())
-                {
-                    drive_details(ui, drive);
+                if let Some(drive) = self.current_drive() {
+                    drive_view(
+                        ui,
+                        drive,
+                        self.fahrenheit,
+                        self.hide_serial,
+                        self.green_mode,
+                        self.raw_format,
+                    );
                 } else if self.loading {
                     ui.centered_and_justified(|ui| {
                         ui.spinner();
-                        ui.label("Scanning Linux block devices and reading SMART data...");
+                        ui.label("Scanning drives...");
+                    });
+                } else if let Some(error) = &self.scan_error {
+                    ui.centered_and_justified(|ui| {
+                        ui.colored_label(Color32::LIGHT_RED, error);
                     });
                 } else {
-                    ui.centered_and_justified(|ui| {
-                        ui.label("No storage device is selected.");
-                    });
+                    ui.centered_and_justified(|ui| ui.label("No storage devices found."));
                 }
             });
+        if self.graph_open {
+            if let Some(drive_name) = self.selected.as_deref() {
+                let title = format!("Graph - {drive_name}");
+                let history = self
+                    .temperature_history
+                    .get(drive_name)
+                    .cloned()
+                    .unwrap_or_default();
+                egui::Window::new(title)
+                    .open(&mut self.graph_open)
+                    .default_size(Vec2::new(720.0, 420.0))
+                    .show(&context, |ui| {
+                        temperature_graph(ui, &history, self.fahrenheit)
+                    });
+            }
+        }
     }
 }
 
-fn drive_details(ui: &mut egui::Ui, drive: &Drive) {
-    ScrollArea::vertical().show(ui, |ui| {
-        ui.label(RichText::new("DRIVE HEALTH").strong().weak());
-        ui.add_space(8.0);
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            let status_color = match drive.smart_status {
-                Some(true) => Color32::from_rgb(75, 190, 125),
-                Some(false) => Color32::from_rgb(240, 95, 85),
-                None => Color32::from_rgb(220, 175, 75),
-            };
-            ui.colored_label(
-                status_color,
-                RichText::new(if drive.assessment.is_empty() {
-                    "Health unavailable"
-                } else {
-                    &drive.assessment
-                })
-                .size(28.0)
-                .strong(),
-            );
-            ui.label(drive.note.as_deref().unwrap_or(if drive.smart_available {
-                "Health and attributes reported by smartctl."
-            } else {
-                "Install smartmontools and allow device access to read SMART information."
-            }));
-            if let Some(remaining) = drive.health_percent {
-                ui.add_space(8.0);
-                ui.add(
-                    egui::ProgressBar::new(f32::from(remaining) / 100.0)
-                        .text(format!("Estimated NVMe life remaining: {remaining}%")),
-                );
+impl DiskInfoApp {
+    fn menu_bar(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
+        egui::MenuBar::new().ui(ui, |ui| {
+            ui.menu_button("File", |ui| {
+                if ui.button("Copy report to clipboard").clicked() {
+                    context.copy_text(self.report_text());
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Exit").clicked() {
+                    context.send_viewport_cmd(egui::ViewportCommand::Close);
+                    ui.close();
+                }
+            });
+            ui.menu_button("Edit", |ui| {
+                if ui.button("Copy drive information").clicked() {
+                    context.copy_text(self.report_text());
+                    ui.close();
+                }
+                ui.checkbox(&mut self.hide_serial, "Hide serial number");
+            });
+            ui.menu_button("Function", |ui| {
+                if ui.button("Refresh     F5").clicked() {
+                    self.start_scan(context.clone());
+                    ui.close();
+                }
+                ui.menu_button("Auto Refresh", |ui| {
+                    for (label, interval) in [
+                        ("Disable", None),
+                        ("1 min.", Some(60.0)),
+                        ("3 min.", Some(180.0)),
+                        ("5 min.", Some(300.0)),
+                        ("10 min.", Some(600.0)),
+                        ("30 min.", Some(1800.0)),
+                        ("60 min.", Some(3600.0)),
+                        ("120 min.", Some(7200.0)),
+                        ("180 min.", Some(10800.0)),
+                        ("360 min.", Some(21600.0)),
+                        ("720 min.", Some(43200.0)),
+                        ("1440 min.", Some(86400.0)),
+                    ] {
+                        let selected = self.auto_refresh_seconds == interval;
+                        if ui.selectable_label(selected, label).clicked() {
+                            self.set_interval(interval);
+                            ui.close();
+                        }
+                    }
+                });
+                ui.separator();
+                if ui.button("Graph").clicked() {
+                    self.graph_open = true;
+                    ui.close();
+                }
+                ui.checkbox(&mut self.fahrenheit, "Fahrenheit");
+                ui.checkbox(&mut self.green_mode, "Green mode");
+                ui.menu_button("Raw Values", |ui| {
+                    for (label, format) in [
+                        ("16 [HEX]", RawFormat::Hex),
+                        ("10 [DEC]", RawFormat::Decimal),
+                        ("10 [DEC] - 2byte", RawFormat::TwoByte),
+                        ("10 [DEC] - 1byte", RawFormat::OneByte),
+                    ] {
+                        if ui
+                            .selectable_label(self.raw_format == format, label)
+                            .clicked()
+                        {
+                            self.raw_format = format;
+                            ui.close();
+                        }
+                    }
+                });
+            });
+            ui.menu_button("Theme", |ui| {
+                if ui.selectable_label(self.dark_theme, "Dark").clicked() {
+                    self.dark_theme = true;
+                    ui.close();
+                }
+                if ui.selectable_label(!self.dark_theme, "Light").clicked() {
+                    self.dark_theme = false;
+                    ui.close();
+                }
+            });
+            ui.menu_button("Disk", |ui| {
+                for drive in &self.drives {
+                    if ui
+                        .selectable_label(
+                            self.selected.as_deref() == Some(&drive.name),
+                            &drive.name,
+                        )
+                        .clicked()
+                    {
+                        self.selected = Some(drive.name.clone());
+                        ui.close();
+                    }
+                }
+            });
+            ui.menu_button("Help", |ui| {
+                ui.label("CrystalDiskInfo Linux port");
+                ui.label("SMART data is provided by smartmontools.");
+            });
+            if self.loading {
+                ui.spinner();
+                ui.label("Scanning");
             }
         });
+    }
 
-        ui.add_space(18.0);
-        section_heading(ui, "DEVICE DETAILS");
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            Grid::new("device_details")
-                .num_columns(2)
-                .spacing(Vec2::new(28.0, 8.0))
-                .striped(true)
-                .show(ui, |ui| {
-                    detail_row(ui, "Device", &format!("/dev/{}", drive.name));
-                    detail_row(ui, "Model", &drive.model);
-                    detail_row(ui, "Serial number", available(&drive.serial));
-                    detail_row(ui, "Drive type", &drive.kind);
-                    detail_row(ui, "Capacity", &storage::format_capacity(drive.capacity));
-                    detail_row(
-                        ui,
-                        "Temperature",
-                        &drive
+    fn drive_tabs(&mut self, ui: &mut egui::Ui) {
+        ScrollArea::horizontal()
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (index, drive) in self.drives.iter().enumerate() {
+                        let selected = self.selected.as_deref() == Some(drive.name.as_str());
+                        let temperature = drive
                             .temperature_c
-                            .map(|value| format!("{value} °C"))
-                            .unwrap_or_else(|| "Unavailable".into()),
-                    );
-                    detail_row(
-                        ui,
-                        "Power-on hours",
-                        &drive
-                            .power_on_hours
-                            .map(|value| format!("{value} hours"))
-                            .unwrap_or_else(|| "Unavailable".into()),
-                    );
-                    ui.end_row();
-                });
-        });
-
-        if !drive.nvme_metrics.is_empty() {
-            ui.add_space(18.0);
-            section_heading(ui, "NVME HEALTH LOG");
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                Grid::new("nvme_health_log")
-                    .num_columns(2)
-                    .spacing(Vec2::new(28.0, 8.0))
-                    .striped(true)
-                    .show(ui, |ui| {
-                        ui.label(RichText::new("Metric").strong());
-                        ui.label(RichText::new("Value").strong());
-                        ui.end_row();
-                        for metric in &drive.nvme_metrics {
-                            detail_row(ui, &metric.name, &metric.value);
+                            .map(|value| show_temperature(value, self.fahrenheit))
+                            .unwrap_or_else(|| "--".into());
+                        let status_color = status_color(drive, self.green_mode);
+                        let button = egui::Button::new(
+                            RichText::new(format!("Disk{index}\n{temperature}"))
+                                .size(12.0)
+                                .color(status_color),
+                        )
+                        .min_size(Vec2::new(48.0, 40.0));
+                        if ui.add(button.selected(selected)).clicked() {
+                            self.selected = Some(drive.name.clone());
                         }
-                    });
-            });
-        }
-
-        if !drive.ata_attributes.is_empty() {
-            ui.add_space(18.0);
-            section_heading(ui, "ATA S.M.A.R.T. ATTRIBUTES");
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                ScrollArea::horizontal().show(ui, |ui| {
-                    Grid::new("ata_smart_attributes")
-                        .num_columns(6)
-                        .spacing(Vec2::new(18.0, 7.0))
-                        .striped(true)
-                        .show(ui, |ui| {
-                            for heading in [
-                                "ID",
-                                "Attribute",
-                                "Current",
-                                "Worst",
-                                "Threshold",
-                                "Raw value",
-                            ] {
-                                ui.label(RichText::new(heading).strong());
-                            }
-                            ui.end_row();
-                            for attribute in &drive.ata_attributes {
-                                ui.label(attribute.id.to_string());
-                                let name = if attribute.failed {
-                                    format!("{} (failed)", attribute.name)
-                                } else {
-                                    attribute.name.clone()
-                                };
-                                ui.label(name);
-                                ui.label(attribute.current.to_string());
-                                ui.label(attribute.worst.to_string());
-                                ui.label(attribute.threshold.to_string());
-                                ui.label(&attribute.raw);
-                                ui.end_row();
-                            }
-                        });
+                    }
+                    if self.drives.is_empty() && !self.loading {
+                        ui.label("No detected disks");
+                    }
                 });
             });
+    }
+
+    fn report_text(&self) -> String {
+        let mut report = String::from("CrystalDiskInfo\n");
+        if let Some(drive) = self.current_drive() {
+            let _ = writeln!(report, "Device: /dev/{}", drive.name);
+            let _ = writeln!(report, "Model: {}", drive.model);
+            if !self.hide_serial {
+                let _ = writeln!(report, "Serial number: {}", drive.serial);
+            }
+            let _ = writeln!(report, "Health: {}", drive.assessment);
+            let _ = writeln!(
+                report,
+                "Temperature: {}",
+                drive
+                    .temperature_c
+                    .map(|value| show_temperature(value, self.fahrenheit))
+                    .unwrap_or_else(|| "Unavailable".into())
+            );
+            let _ = writeln!(
+                report,
+                "Capacity: {}",
+                storage::format_capacity(drive.capacity)
+            );
+            for attribute in &drive.ata_attributes {
+                let _ = writeln!(
+                    report,
+                    "{} {}: {}",
+                    attribute.id, attribute.name, attribute.raw
+                );
+            }
+        }
+        report
+    }
+}
+
+fn drive_view(
+    ui: &mut egui::Ui,
+    drive: &Drive,
+    fahrenheit: bool,
+    hide_serial: bool,
+    green_mode: bool,
+    raw_format: RawFormat,
+) {
+    ui.vertical(|ui| {
+        let (status, color) = status_label(drive, green_mode);
+        let model_capacity = format!(
+            "{} : {}",
+            drive.model,
+            storage::format_capacity(drive.capacity)
+        );
+        ui.label(RichText::new(model_capacity).strong().size(16.0));
+        ui.add_space(4.0);
+
+        ui.allocate_ui_with_layout(
+            Vec2::new(ui.available_width(), 192.0),
+            Layout::left_to_right(Align::Min),
+            |ui| {
+                ui.allocate_ui_with_layout(
+                    Vec2::new(112.0, 192.0),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        ui.label(RichText::new("Health Status").weak().size(11.0));
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            ui.set_min_size(Vec2::new(100.0, 34.0));
+                            ui.centered_and_justified(|ui| {
+                                ui.colored_label(color, RichText::new(status).strong());
+                            });
+                        });
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Temperature").weak().size(11.0));
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            ui.set_min_size(Vec2::new(100.0, 34.0));
+                            ui.centered_and_justified(|ui| {
+                                let temperature = drive
+                                    .temperature_c
+                                    .map(|value| show_temperature(value, fahrenheit))
+                                    .unwrap_or_else(|| {
+                                        if fahrenheit { "-- °F" } else { "-- °C" }.into()
+                                    });
+                                ui.colored_label(
+                                    color,
+                                    RichText::new(temperature).size(18.0).strong(),
+                                );
+                            });
+                        });
+                        if let Some(life) = drive.health_percent {
+                            ui.add_space(8.0);
+                            ui.label(RichText::new("Life").weak().size(11.0));
+                            ui.add(
+                                egui::ProgressBar::new(f32::from(life) / 100.0)
+                                    .text(format!("{life}%")),
+                            );
+                        }
+                    },
+                );
+
+                ui.separator();
+                ui.columns(2, |columns| {
+                    metadata_column(&mut columns[0], drive, hide_serial, fahrenheit);
+                    metadata_column_secondary(&mut columns[1], drive);
+                });
+            },
+        );
+
+        ui.separator();
+        if !drive.ata_attributes.is_empty() {
+            ui.label(RichText::new("S.M.A.R.T.").strong().size(12.0));
+            ata_attribute_table(ui, drive, raw_format);
+        } else if !drive.nvme_metrics.is_empty() {
+            ui.label(RichText::new("NVMe S.M.A.R.T.").strong().size(12.0));
+            nvme_table(ui, drive);
+        } else {
+            ui.label(
+                RichText::new(
+                    drive
+                        .note
+                        .as_deref()
+                        .unwrap_or("S.M.A.R.T. data is unavailable for this drive."),
+                )
+                .weak(),
+            );
         }
     });
 }
 
-fn section_heading(ui: &mut egui::Ui, title: &str) {
-    ui.label(RichText::new(title).strong().weak());
-    ui.add_space(8.0);
+fn metadata_column(ui: &mut egui::Ui, drive: &Drive, hide_serial: bool, fahrenheit: bool) {
+    Grid::new("metadata_left")
+        .num_columns(2)
+        .spacing(Vec2::new(12.0, 6.0))
+        .show(ui, |ui| {
+            metadata(ui, "Firmware", option(&drive.firmware));
+            metadata(
+                ui,
+                "Serial Number",
+                if hide_serial {
+                    "Hidden"
+                } else {
+                    available(&drive.serial)
+                },
+            );
+            metadata(ui, "Interface", option(&drive.interface));
+            metadata(ui, "Transfer Mode", option(&drive.transfer_mode));
+            metadata(ui, "Drive Letter", &drive.drive_map.join(", "));
+            metadata(ui, "Standard", &drive.kind);
+            metadata(
+                ui,
+                "Temperature",
+                &drive
+                    .temperature_c
+                    .map(|value| show_temperature(value, fahrenheit))
+                    .unwrap_or_else(|| "Unavailable".into()),
+            );
+        });
 }
 
-fn detail_row(ui: &mut egui::Ui, name: &str, value: &str) {
-    ui.label(RichText::new(name).weak());
+fn metadata_column_secondary(ui: &mut egui::Ui, drive: &Drive) {
+    Grid::new("metadata_right")
+        .num_columns(2)
+        .spacing(Vec2::new(12.0, 6.0))
+        .show(ui, |ui| {
+            metadata(ui, "Buffer Size", "Unavailable");
+            metadata(ui, "NV Cache Size", "Unavailable");
+            metadata(ui, "Rotation Rate", option(&drive.rotation_rate));
+            metadata(
+                ui,
+                "Power On Count",
+                &drive
+                    .power_cycles
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "Unavailable".into()),
+            );
+            metadata(
+                ui,
+                "Power On Hours",
+                &drive
+                    .power_on_hours
+                    .map(|value| format!("{value} hours"))
+                    .unwrap_or_else(|| "Unavailable".into()),
+            );
+            metadata(ui, "Features", "");
+            metadata(
+                ui,
+                "SMART Access",
+                if drive.smart_available {
+                    "Enabled"
+                } else {
+                    "Unavailable"
+                },
+            );
+        });
+}
+
+fn metadata(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.label(RichText::new(label).weak());
     ui.label(value);
     ui.end_row();
+}
+
+fn ata_attribute_table(ui: &mut egui::Ui, drive: &Drive, raw_format: RawFormat) {
+    let headers = [
+        "",
+        "ID",
+        "Attribute Name",
+        "Current",
+        "Worst",
+        "Threshold",
+        "Raw Values",
+    ];
+    ScrollArea::vertical()
+        .auto_shrink([false, true])
+        .max_height(ui.available_height())
+        .show(ui, |ui| {
+            Grid::new("ata_smart_table")
+                .num_columns(headers.len())
+                .spacing(Vec2::new(10.0, 3.0))
+                .striped(true)
+                .show(ui, |ui| {
+                    for heading in headers {
+                        ui.label(RichText::new(heading).weak().size(11.0));
+                    }
+                    ui.end_row();
+                    for attribute in &drive.ata_attributes {
+                        let failed = attribute.failed
+                            || (attribute.threshold > 0 && attribute.current < attribute.threshold);
+                        let (label, color) = if failed {
+                            ("BAD", Color32::from_rgb(234, 77, 77))
+                        } else {
+                            ("GOOD", Color32::from_rgb(63, 184, 107))
+                        };
+                        ui.colored_label(color, label);
+                        ui.label(format!("{:02X}", attribute.id));
+                        ui.label(&attribute.name);
+                        ui.label(attribute.current.to_string());
+                        ui.label(attribute.worst.to_string());
+                        ui.label(if attribute.threshold == 0 {
+                            "---".into()
+                        } else {
+                            attribute.threshold.to_string()
+                        });
+                        ui.label(format_raw(attribute, raw_format));
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
+fn format_raw(attribute: &storage::AtaSmartAttribute, format: RawFormat) -> String {
+    let Some(value) = attribute.raw_value else {
+        return attribute.raw.clone();
+    };
+    let byte = |index: u32| ((value >> (index * 8)) & 0xff) as u8;
+    match format {
+        RawFormat::Hex => format!(
+            "00{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+            byte(5),
+            byte(4),
+            byte(3),
+            byte(2),
+            byte(1),
+            byte(0)
+        ),
+        RawFormat::Decimal => value.to_string(),
+        RawFormat::TwoByte => format!(
+            "{} {} {}",
+            u16::from_le_bytes([byte(4), byte(5)]),
+            u16::from_le_bytes([byte(2), byte(3)]),
+            u16::from_le_bytes([byte(0), byte(1)])
+        ),
+        RawFormat::OneByte => format!(
+            "{} {} {} {} {} {}",
+            byte(5),
+            byte(4),
+            byte(3),
+            byte(2),
+            byte(1),
+            byte(0)
+        ),
+    }
+}
+
+fn nvme_table(ui: &mut egui::Ui, drive: &Drive) {
+    Grid::new("nvme_smart_table")
+        .num_columns(4)
+        .spacing(Vec2::new(10.0, 3.0))
+        .striped(true)
+        .show(ui, |ui| {
+            for heading in ["", "ID", "Attribute Name", "Raw Values"] {
+                ui.label(RichText::new(heading).weak().size(11.0));
+            }
+            ui.end_row();
+            for metric in &drive.nvme_metrics {
+                let (label, color) = if drive.smart_status == Some(false) {
+                    ("BAD", Color32::from_rgb(234, 77, 77))
+                } else if drive.smart_status == Some(true) {
+                    ("GOOD", Color32::from_rgb(63, 184, 107))
+                } else {
+                    ("UNKNOWN", Color32::GRAY)
+                };
+                ui.colored_label(color, label);
+                ui.label("");
+                ui.label(&metric.name);
+                ui.label(&metric.value);
+                ui.end_row();
+            }
+        });
+}
+
+fn status_label(drive: &Drive, green_mode: bool) -> (&str, Color32) {
+    match drive.smart_status {
+        Some(false) => ("Caution", Color32::from_rgb(235, 87, 87)),
+        Some(true) if green_mode => ("Good", Color32::from_rgb(87, 205, 95)),
+        Some(true) => ("Good", Color32::from_rgb(55, 181, 118)),
+        None => ("Unknown", Color32::from_rgb(145, 150, 160)),
+    }
+}
+
+fn status_color(drive: &Drive, green_mode: bool) -> Color32 {
+    status_label(drive, green_mode).1
+}
+
+fn show_temperature(celsius: i64, fahrenheit: bool) -> String {
+    if fahrenheit {
+        format!("{} °F", celsius * 9 / 5 + 32)
+    } else {
+        format!("{celsius} °C")
+    }
+}
+
+fn temperature_graph(ui: &mut egui::Ui, history: &[(f64, f32)], fahrenheit: bool) {
+    ui.label(RichText::new("TEMPERATURE HISTORY").strong());
+    ui.label("Samples are recorded each time the drive scan completes.");
+    ui.add_space(8.0);
+    let (rect, _) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 280.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let panel = ui.visuals().extreme_bg_color;
+    painter.rect_filled(rect, 4.0, panel);
+    painter.rect_stroke(
+        rect,
+        4.0,
+        Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+        StrokeKind::Inside,
+    );
+    if history.is_empty() {
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "No temperature history yet. Refresh the drive to record a sample.",
+            FontId::proportional(14.0),
+            ui.visuals().text_color(),
+        );
+        return;
+    }
+
+    let plot = rect.shrink2(Vec2::new(48.0, 26.0));
+    let temperatures = history
+        .iter()
+        .map(|(_, value)| {
+            if fahrenheit {
+                value * 9.0 / 5.0 + 32.0
+            } else {
+                *value
+            }
+        })
+        .collect::<Vec<_>>();
+    let min = temperatures
+        .iter()
+        .copied()
+        .fold(f32::INFINITY, f32::min)
+        .floor()
+        - 2.0;
+    let max = temperatures
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil()
+        + 2.0;
+    let span = (max - min).max(1.0);
+    for step in 0..=4 {
+        let fraction = step as f32 / 4.0;
+        let y = plot.bottom() - fraction * plot.height();
+        painter.line_segment(
+            [Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)],
+            Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+        );
+        painter.text(
+            Pos2::new(rect.left() + 4.0, y),
+            Align2::LEFT_CENTER,
+            format!("{:.0}°", min + span * fraction),
+            FontId::proportional(11.0),
+            ui.visuals().weak_text_color(),
+        );
+    }
+    let first_time = history.first().map(|sample| sample.0).unwrap_or_default();
+    let last_time = history.last().map(|sample| sample.0).unwrap_or(first_time);
+    let time_span = (last_time - first_time).max(1.0);
+    let points = history
+        .iter()
+        .zip(temperatures.iter())
+        .map(|((time, _), temperature)| {
+            let x = plot.left() + ((*time - first_time) / time_span) as f32 * plot.width();
+            let y = plot.bottom() - (*temperature - min) / span * plot.height();
+            Pos2::new(x, y)
+        })
+        .collect::<Vec<_>>();
+    for pair in points.windows(2) {
+        painter.line_segment(
+            [pair[0], pair[1]],
+            Stroke::new(2.0, Color32::from_rgb(80, 180, 235)),
+        );
+    }
+    if let Some(point) = points.last() {
+        painter.circle_filled(*point, 4.0, Color32::from_rgb(80, 180, 235));
+    }
+    painter.text(
+        Pos2::new(rect.center().x, rect.bottom() - 8.0),
+        Align2::CENTER_BOTTOM,
+        format!("{} samples", history.len()),
+        FontId::proportional(11.0),
+        ui.visuals().weak_text_color(),
+    );
+}
+
+fn option(value: &Option<String>) -> &str {
+    value
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Unavailable")
 }
 
 fn available(value: &str) -> &str {

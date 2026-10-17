@@ -4,9 +4,9 @@ mod ui;
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([1120.0, 780.0])
+            .with_inner_size([ui::MAIN_WINDOW_WIDTH, ui::MAIN_WINDOW_HEIGHT])
             .with_min_inner_size([860.0, 600.0])
-            .with_title("CrystalDiskInfo for Linux"),
+            .with_title("CrystalDiskInfo"),
         ..Default::default()
     };
 

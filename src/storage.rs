@@ -5,9 +5,15 @@ use std::{fs, path::Path, process::Command};
 pub struct Drive {
     pub name: String,
     pub model: String,
+    pub firmware: Option<String>,
     pub serial: String,
     pub kind: String,
     pub capacity: u64,
+    pub interface: Option<String>,
+    pub transfer_mode: Option<String>,
+    pub drive_map: Vec<String>,
+    pub rotation_rate: Option<String>,
+    pub power_cycles: Option<u64>,
     pub temperature_c: Option<i64>,
     pub power_on_hours: Option<u64>,
     pub health_percent: Option<u8>,
@@ -33,6 +39,7 @@ pub struct AtaSmartAttribute {
     pub worst: u16,
     pub threshold: u16,
     pub raw: String,
+    pub raw_value: Option<u64>,
     pub failed: bool,
 }
 
@@ -40,8 +47,12 @@ pub struct AtaSmartAttribute {
 struct SmartctlOutput {
     model_name: Option<String>,
     model_family: Option<String>,
+    firmware_version: Option<String>,
     serial_number: Option<String>,
     user_capacity: Option<Capacity>,
+    rotation_rate: Option<serde_json::Value>,
+    ata_version: Option<VersionInfo>,
+    sata_interface_speed: Option<SataInterfaceSpeed>,
     temperature: Option<Temperature>,
     power_on_time: Option<PowerOnTime>,
     smart_status: Option<SmartStatus>,
@@ -52,6 +63,14 @@ struct SmartctlOutput {
 #[derive(Deserialize)]
 struct Capacity {
     bytes: Option<u64>,
+}
+#[derive(Deserialize)]
+struct VersionInfo {
+    string: Option<String>,
+}
+#[derive(Deserialize)]
+struct SataInterfaceSpeed {
+    current: Option<VersionInfo>,
 }
 #[derive(Deserialize)]
 struct Temperature {
@@ -67,6 +86,7 @@ struct SmartStatus {
 }
 #[derive(Deserialize)]
 struct NvmeHealth {
+    critical_warning: Option<u8>,
     temperature: Option<i64>,
     available_spare: Option<u8>,
     available_spare_threshold: Option<u8>,
@@ -134,6 +154,14 @@ pub fn discover() -> Vec<Drive> {
                 capacity: bytes,
                 ..Drive::default()
             };
+            drive.drive_map = mounted_paths(&name);
+            drive.rotation_rate = read_trimmed(root.join("queue/rotational")).map(|value| {
+                if value == "1" {
+                    "Rotational".into()
+                } else {
+                    "SSD".into()
+                }
+            });
             if let Some(smart) = read_smartctl(&name) {
                 merge_smart(&mut drive, smart);
             }
@@ -184,6 +212,7 @@ fn merge_smart(drive: &mut Drive, result: SmartctlEnvelope) {
         .or(data.model_family)
         .unwrap_or_else(|| drive.model.clone());
     drive.serial = data.serial_number.unwrap_or_default();
+    drive.firmware = data.firmware_version;
     drive.capacity = data
         .user_capacity
         .and_then(|v| v.bytes)
@@ -192,7 +221,32 @@ fn merge_smart(drive: &mut Drive, result: SmartctlEnvelope) {
     drive.temperature_c = data.temperature.and_then(|v| v.current);
     drive.power_on_hours = data.power_on_time.and_then(|v| v.hours);
     drive.smart_status = data.smart_status.and_then(|v| v.passed);
+    drive.interface = data
+        .ata_version
+        .and_then(|version| version.string)
+        .or_else(|| Some(drive.kind.clone()));
+    drive.transfer_mode = data
+        .sata_interface_speed
+        .and_then(|speed| speed.current)
+        .and_then(|speed| speed.string);
+    if let Some(rotation_rate) = data.rotation_rate {
+        drive.rotation_rate = Some(if let Some(rate) = rotation_rate.as_u64() {
+            if rate == 0 {
+                "SSD".into()
+            } else {
+                format!("{rate} RPM")
+            }
+        } else {
+            rotation_rate.as_str().unwrap_or_default().to_string()
+        });
+    }
     if let Some(nvme) = data.nvme_smart_health_information_log {
+        drive.power_cycles = nvme.power_cycles.or(drive.power_cycles);
+        if nvme.critical_warning.is_some_and(|warning| warning != 0) {
+            drive.smart_status = Some(false);
+        } else if drive.smart_status.is_none() {
+            drive.smart_status = Some(true);
+        }
         drive.temperature_c = nvme.temperature.or(drive.temperature_c);
         drive.power_on_hours = nvme.power_on_hours.or(drive.power_on_hours);
         drive.health_percent = nvme
@@ -262,6 +316,7 @@ fn merge_smart(drive: &mut Drive, result: SmartctlEnvelope) {
                         .and_then(|raw| raw.string.clone())
                         .or_else(|| raw.and_then(|raw| raw.value).map(|v| v.to_string()))
                         .unwrap_or_else(|| "-".into()),
+                    raw_value: raw.and_then(|raw| raw.value),
                     failed: attribute
                         .when_failed
                         .as_deref()
@@ -272,6 +327,7 @@ fn merge_smart(drive: &mut Drive, result: SmartctlEnvelope) {
             let value = raw.as_ref().and_then(|raw| raw.value);
             match attribute.id {
                 Some(9) => drive.power_on_hours = value.or(drive.power_on_hours),
+                Some(12) => drive.power_cycles = value.or(drive.power_cycles),
                 Some(194 | 190) => {
                     let parsed = raw
                         .as_ref()
@@ -285,6 +341,11 @@ fn merge_smart(drive: &mut Drive, result: SmartctlEnvelope) {
                 _ => {}
             }
         }
+    }
+    if drive.smart_status.is_none() && !drive.ata_attributes.is_empty() {
+        drive.smart_status = Some(!drive.ata_attributes.iter().any(|attribute| {
+            attribute.failed || (attribute.threshold > 0 && attribute.current < attribute.threshold)
+        }));
     }
     drive.smart_available = drive.smart_status.is_some()
         || drive.temperature_c.is_some()
@@ -313,6 +374,36 @@ fn merge_smart(drive: &mut Drive, result: SmartctlEnvelope) {
         drive.note = Some("The device could not be opened for SMART queries.".into());
     }
     let _ = result.device.and_then(|v| v.name);
+}
+
+fn mounted_paths(device: &str) -> Vec<String> {
+    let Ok(device_path) = fs::canonicalize(format!("/sys/block/{device}")) else {
+        return Vec::new();
+    };
+    let Ok(mounts) = fs::read_to_string("/proc/self/mounts") else {
+        return Vec::new();
+    };
+    let mut paths = mounts
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let source = fields.next()?;
+            let mount_point = fields.next()?;
+            if !source.starts_with("/dev/") {
+                return None;
+            }
+            let source_name = source.rsplit('/').next()?;
+            let source_sysfs = fs::canonicalize(format!("/sys/class/block/{source_name}")).ok()?;
+            if source_sysfs == device_path || source_sysfs.starts_with(&device_path) {
+                Some(mount_point.replace("\\040", " "))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 pub fn format_capacity(bytes: u64) -> String {
