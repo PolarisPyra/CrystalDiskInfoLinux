@@ -30,7 +30,7 @@ sudo pacman -S smartmontools
 
 ## Packaging
 
-Build an x86_64 AppImage (requires `magick`; the script downloads linuxdeploy on first use):
+Build an x86_64 AppImage (the script downloads linuxdeploy on first use):
 
 ```sh
 packaging/build-appimage.sh

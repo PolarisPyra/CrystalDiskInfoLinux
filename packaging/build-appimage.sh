@@ -8,7 +8,7 @@ if [[ "$arch" != "x86_64" ]]; then
     exit 1
 fi
 
-for tool in cargo curl magick; do
+for tool in cargo curl; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         printf '%s was not found. Install it before building the AppImage.\n' "$tool" >&2
         exit 1
@@ -32,7 +32,7 @@ if [[ ! -x "$linuxdeploy" ]]; then
 fi
 
 cargo build --release --locked --manifest-path "$repo_root/Cargo.toml"
-magick "$repo_root/assets/logo.png" -resize 512x512 "$app_icon"
+cp "$repo_root/assets/logo.png" "$app_icon"
 rm -rf "$appdir"
 
 cd "$appimage_dir"

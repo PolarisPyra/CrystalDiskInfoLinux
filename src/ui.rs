@@ -18,6 +18,14 @@ enum RawFormat {
     OneByte,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DriveViewAction {
+    PreviousDrive,
+    NextDrive,
+    HealthSetting,
+    TemperatureSetting,
+}
+
 pub struct DiskInfoApp {
     drives: Vec<Drive>,
     selected: Option<String>,
@@ -356,13 +364,34 @@ impl eframe::App for DiskInfoApp {
                         self.green_mode,
                         self.raw_format,
                     );
-                    if let Some(health) = clicked_setting {
-                        self.begin_settings();
-                        if health {
+                    match clicked_setting {
+                        Some(DriveViewAction::PreviousDrive) if !self.drives.is_empty() => {
+                            let index = self
+                                .drives
+                                .iter()
+                                .position(|item| item.name == drive.name)
+                                .unwrap_or_default();
+                            let previous = (index + self.drives.len() - 1) % self.drives.len();
+                            self.selected = Some(self.drives[previous].name.clone());
+                        }
+                        Some(DriveViewAction::NextDrive) if !self.drives.is_empty() => {
+                            let index = self
+                                .drives
+                                .iter()
+                                .position(|item| item.name == drive.name)
+                                .unwrap_or_default();
+                            self.selected =
+                                Some(self.drives[(index + 1) % self.drives.len()].name.clone());
+                        }
+                        Some(DriveViewAction::HealthSetting) => {
+                            self.begin_settings();
                             self.health_dialog = true;
-                        } else {
+                        }
+                        Some(DriveViewAction::TemperatureSetting) => {
+                            self.begin_settings();
                             self.temperature_dialog = true;
                         }
+                        _ => {}
                     }
                 } else if self.loading {
                     ui.centered_and_justified(|ui| {
@@ -1221,16 +1250,31 @@ fn drive_view(
     hide_serial: bool,
     green_mode: bool,
     raw_format: RawFormat,
-) -> Option<bool> {
+) -> Option<DriveViewAction> {
     let mut open_setting = None;
     ui.vertical(|ui| {
         let (status, color) = status_label_with_settings(drive, settings, green_mode);
-        let model_capacity = format!(
-            "{} : {}",
-            drive.model,
-            storage::format_capacity(drive.capacity)
-        );
-        ui.label(RichText::new(model_capacity).strong().size(16.0));
+        ui.horizontal(|ui| {
+            if ui
+                .add_sized(Vec2::new(28.0, 24.0), egui::Button::new("‹"))
+                .clicked()
+            {
+                open_setting = Some(DriveViewAction::PreviousDrive);
+            }
+            let model_width = (ui.available_width() - 68.0).max(0.0);
+            ui.add_sized(
+                Vec2::new(model_width, 32.0),
+                egui::Label::new(RichText::new(&drive.model).strong().size(16.0))
+                    .truncate()
+                    .selectable(false),
+            );
+            if ui
+                .add_sized(Vec2::new(28.0, 24.0), egui::Button::new("›"))
+                .clicked()
+            {
+                open_setting = Some(DriveViewAction::NextDrive);
+            }
+        });
         ui.add_space(4.0);
 
         ui.allocate_ui_with_layout(
@@ -1242,17 +1286,19 @@ fn drive_view(
                     Layout::top_down(Align::Min),
                     |ui| {
                         ui.label(RichText::new("Health Status").weak().size(11.0));
+                        ui.add_space(4.0);
                         if ui
                             .add_sized(
-                                Vec2::new(100.0, 34.0),
+                                Vec2::new(100.0, 60.0),
                                 egui::Button::new(RichText::new(status).strong().color(color)),
                             )
                             .clicked()
                         {
-                            open_setting = Some(true);
+                            open_setting = Some(DriveViewAction::HealthSetting);
                         }
-                        ui.add_space(8.0);
+                        ui.add_space(12.0);
                         ui.label(RichText::new("Temperature").weak().size(11.0));
+                        ui.add_space(4.0);
                         let temperature = drive
                             .temperature_c
                             .map(|value| show_temperature(value, fahrenheit))
@@ -1269,7 +1315,7 @@ fn drive_view(
                             .unwrap_or(color);
                         if ui
                             .add_sized(
-                                Vec2::new(100.0, 34.0),
+                                Vec2::new(100.0, 40.0),
                                 egui::Button::new(
                                     RichText::new(temperature)
                                         .size(18.0)
@@ -1279,22 +1325,14 @@ fn drive_view(
                             )
                             .clicked()
                         {
-                            open_setting = Some(false);
-                        }
-                        if let Some(life) = drive.health_percent {
-                            ui.add_space(8.0);
-                            ui.label(RichText::new("Life").weak().size(11.0));
-                            ui.add(
-                                egui::ProgressBar::new(f32::from(life) / 100.0)
-                                    .text(format!("{life}%")),
-                            );
+                            open_setting = Some(DriveViewAction::TemperatureSetting);
                         }
                     },
                 );
 
                 ui.separator();
                 ui.columns(2, |columns| {
-                    metadata_column(&mut columns[0], drive, hide_serial, fahrenheit);
+                    metadata_column(&mut columns[0], drive, hide_serial);
                     metadata_column_secondary(&mut columns[1], drive);
                 });
             },
@@ -1322,10 +1360,10 @@ fn drive_view(
     open_setting
 }
 
-fn metadata_column(ui: &mut egui::Ui, drive: &Drive, hide_serial: bool, fahrenheit: bool) {
+fn metadata_column(ui: &mut egui::Ui, drive: &Drive, hide_serial: bool) {
     Grid::new("metadata_left")
         .num_columns(2)
-        .spacing(Vec2::new(12.0, 6.0))
+        .spacing(Vec2::new(12.0, 4.0))
         .show(ui, |ui| {
             metadata(ui, "Firmware", option(&drive.firmware));
             metadata(
@@ -1341,21 +1379,14 @@ fn metadata_column(ui: &mut egui::Ui, drive: &Drive, hide_serial: bool, fahrenhe
             metadata(ui, "Transfer Mode", option(&drive.transfer_mode));
             metadata(ui, "Drive Letter", &drive.drive_map.join(", "));
             metadata(ui, "Standard", &drive.kind);
-            metadata(
-                ui,
-                "Temperature",
-                &drive
-                    .temperature_c
-                    .map(|value| show_temperature(value, fahrenheit))
-                    .unwrap_or_else(|| "Unavailable".into()),
-            );
+            metadata(ui, "Feature", "Unavailable");
         });
 }
 
 fn metadata_column_secondary(ui: &mut egui::Ui, drive: &Drive) {
     Grid::new("metadata_right")
         .num_columns(2)
-        .spacing(Vec2::new(12.0, 6.0))
+        .spacing(Vec2::new(12.0, 4.0))
         .show(ui, |ui| {
             metadata(ui, "Buffer Size", "Unavailable");
             metadata(ui, "NV Cache Size", "Unavailable");
@@ -1375,16 +1406,6 @@ fn metadata_column_secondary(ui: &mut egui::Ui, drive: &Drive) {
                     .power_on_hours
                     .map(|value| format!("{value} hours"))
                     .unwrap_or_else(|| "Unavailable".into()),
-            );
-            metadata(ui, "Features", "");
-            metadata(
-                ui,
-                "SMART Access",
-                if drive.smart_available {
-                    "Enabled"
-                } else {
-                    "Unavailable"
-                },
             );
         });
 }
