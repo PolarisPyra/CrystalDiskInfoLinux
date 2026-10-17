@@ -1597,6 +1597,30 @@ impl DiskInfoApp {
                 "       Disk Size : {}",
                 storage::format_capacity(drive.capacity)
             );
+            if let Some(host_reads_gb) = drive.host_reads_gb {
+                let _ = writeln!(report, " Total Host Reads : {host_reads_gb} GB");
+            } else {
+                let _ = writeln!(report, "     Buffer Size : Unavailable");
+            }
+            if let Some(host_writes_gb) = drive.host_writes_gb {
+                let _ = writeln!(report, "Total Host Writes : {host_writes_gb} GB");
+            } else {
+                let _ = writeln!(report, "    NV Cache Size : Unavailable");
+            }
+            let rotation_rate = drive
+                .rotation_rate
+                .as_deref()
+                .map(|rate| {
+                    if rate.eq_ignore_ascii_case("SSD")
+                        || rate.eq_ignore_ascii_case("solid state device")
+                    {
+                        "---- (SSD)"
+                    } else {
+                        rate
+                    }
+                })
+                .unwrap_or("Unavailable");
+            let _ = writeln!(report, "   Rotation Rate : {rotation_rate}");
             let _ = writeln!(report, "       Interface : {}", option(&drive.interface));
             let _ = writeln!(report, "        Standard : {}", drive.kind);
             let _ = writeln!(
@@ -1637,6 +1661,15 @@ impl DiskInfoApp {
             let (health_status, _) = status_label_with_settings(drive, &settings, self.green_mode);
             let _ = writeln!(report, "   Health Status : {health_status}");
             let _ = writeln!(report, "    Drive Letter : {}", drive.drive_map.join(", "));
+            let _ = writeln!(
+                report,
+                "        Features : {}",
+                if drive.features.is_empty() {
+                    "Unavailable".into()
+                } else {
+                    drive.features.join(", ")
+                }
+            );
             if !drive.ata_attributes.is_empty() {
                 report.push_str("\n-- S.M.A.R.T. --------------------------------------------------------------\n");
             }
@@ -2017,7 +2050,7 @@ fn drive_view(
             .on_hover_text(format!(
                 "{} : {}",
                 drive.model,
-                source_capacity(drive.capacity)
+                storage::format_capacity(drive.capacity)
             ));
             if ui
                 .add_sized(Vec2::new(28.0, 24.0), egui::Button::new("›"))
@@ -2237,17 +2270,6 @@ fn power_on_duration_tooltip(total_hours: u64) -> String {
         format!("{years} years {days} days {hours} hours")
     } else {
         format!("{days} days {hours} hours")
-    }
-}
-
-fn source_capacity(bytes: u64) -> String {
-    let megabytes = bytes / 1_000_000;
-    if megabytes >= 1000 {
-        format!("{:.1} GB", megabytes as f64 / 1000.0)
-    } else if megabytes > 0 {
-        format!("{megabytes} MB")
-    } else {
-        "Unknown".into()
     }
 }
 

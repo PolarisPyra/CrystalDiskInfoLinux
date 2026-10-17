@@ -666,17 +666,13 @@ fn mounted_paths(device: &str) -> Vec<String> {
 }
 
 pub fn format_capacity(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "GB", "TB", "PB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1000.0 && unit < UNITS.len() - 1 {
-        value /= 1000.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{value:.0} {}", UNITS[unit])
+    let megabytes = bytes / 1_000_000;
+    if megabytes >= 1000 {
+        format!("{:.1} GB", megabytes as f64 / 1000.0)
+    } else if megabytes > 0 {
+        format!("{megabytes} MB")
     } else {
-        format!("{value:.2} {}", UNITS[unit])
+        "Unknown".into()
     }
 }
 
