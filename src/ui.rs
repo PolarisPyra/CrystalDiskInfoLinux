@@ -2060,18 +2060,22 @@ fn drive_view(
                             Some(_) => Color32::from_rgb(55, 181, 118),
                             None => Color32::from_rgb(145, 150, 160),
                         };
-                        if ui
-                            .add_sized(
-                                Vec2::new(100.0, 40.0),
-                                egui::Button::new(
-                                    RichText::new(temperature)
-                                        .size(18.0)
-                                        .strong()
-                                        .color(temperature_color),
-                                ),
-                            )
-                            .clicked()
-                        {
+                        let temperature_button = ui.add_sized(
+                            Vec2::new(100.0, 40.0),
+                            egui::Button::new(
+                                RichText::new(temperature)
+                                    .size(18.0)
+                                    .strong()
+                                    .color(temperature_color),
+                            ),
+                        );
+                        let temperature_button =
+                            if let Some(tooltip) = nvme_temperature_tooltip(drive, fahrenheit) {
+                                temperature_button.on_hover_text(tooltip)
+                            } else {
+                                temperature_button
+                            };
+                        if temperature_button.clicked() {
                             open_setting = Some(DriveViewAction::TemperatureSetting);
                         }
                     },
@@ -2340,6 +2344,31 @@ fn format_nvme_raw(metric: &storage::Metric, format: RawFormat) -> Option<String
             bytes[5], bytes[4], bytes[3], bytes[2], bytes[1], bytes[0]
         ),
     })
+}
+
+fn nvme_temperature_tooltip(drive: &Drive, fahrenheit: bool) -> Option<String> {
+    let mut lines = Vec::new();
+    for metric in &drive.nvme_metrics {
+        if !(0x12..=0x19).contains(&metric.id) {
+            continue;
+        }
+        let celsius = metric
+            .value
+            .split_whitespace()
+            .next()?
+            .parse::<i64>()
+            .ok()?;
+        let temperature = if fahrenheit {
+            format!("{} °F", celsius * 9 / 5 + 32)
+        } else {
+            format!("{celsius} °C")
+        };
+        lines.push(format!(
+            "Temperature sensor {}: {temperature}",
+            metric.id - 0x11
+        ));
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 fn nvme_metric_status(
