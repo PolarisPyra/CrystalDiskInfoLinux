@@ -41,9 +41,33 @@ pub struct DiskInfoApp {
     health_draft: HealthThresholds,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct UserSettings {
     drives: HashMap<String, DriveSettings>,
+    #[serde(default)]
+    hide_serial: bool,
+    #[serde(default)]
+    fahrenheit: bool,
+    #[serde(default = "default_dark_theme")]
+    dark_theme: bool,
+    #[serde(default)]
+    green_mode: bool,
+}
+
+impl Default for UserSettings {
+    fn default() -> Self {
+        Self {
+            drives: HashMap::new(),
+            hide_serial: false,
+            fahrenheit: false,
+            dark_theme: true,
+            green_mode: false,
+        }
+    }
+}
+
+fn default_dark_theme() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -141,6 +165,10 @@ impl DiskInfoApp {
             temperature_draft: 50,
             health_draft: HealthThresholds::default(),
         };
+        app.hide_serial = app.settings.hide_serial;
+        app.fahrenheit = app.settings.fahrenheit;
+        app.dark_theme = app.settings.dark_theme;
+        app.green_mode = app.settings.green_mode;
         app.start_scan(context.egui_ctx.clone());
         app
     }
@@ -251,22 +279,30 @@ impl eframe::App for DiskInfoApp {
                 egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin::symmetric(10, 8)),
             )
             .show(ui, |ui| {
-                if let Some(drive) = self.current_drive() {
+                if let Some(drive) = self.current_drive().cloned() {
                     let settings = self
                         .settings
                         .drives
                         .get(&drive.name)
                         .cloned()
-                        .unwrap_or_else(|| DriveSettings::defaults(drive));
-                    drive_view(
+                        .unwrap_or_else(|| DriveSettings::defaults(&drive));
+                    let clicked_setting = drive_view(
                         ui,
-                        drive,
+                        &drive,
                         &settings,
                         self.fahrenheit,
                         self.hide_serial,
                         self.green_mode,
                         self.raw_format,
                     );
+                    if let Some(health) = clicked_setting {
+                        self.begin_settings();
+                        if health {
+                            self.health_dialog = true;
+                        } else {
+                            self.temperature_dialog = true;
+                        }
+                    }
                 } else if self.loading {
                     ui.centered_and_justified(|ui| {
                         ui.spinner();
@@ -319,7 +355,13 @@ impl DiskInfoApp {
                     context.copy_text(self.report_text());
                     ui.close();
                 }
-                ui.checkbox(&mut self.hide_serial, "Hide serial number");
+                if ui
+                    .checkbox(&mut self.hide_serial, "Hide serial number")
+                    .changed()
+                {
+                    self.settings.hide_serial = self.hide_serial;
+                    save_settings(&self.settings);
+                }
             });
             ui.menu_button("Function", |ui| {
                 if ui.button("Refresh     F5").clicked() {
@@ -349,22 +391,42 @@ impl DiskInfoApp {
                     }
                 });
                 ui.separator();
-                if ui.button("Temperature Setting").clicked() {
-                    self.begin_settings();
-                    self.temperature_dialog = true;
-                    ui.close();
-                }
-                if ui.button("Health Status Setting").clicked() {
-                    self.begin_settings();
-                    self.health_dialog = true;
-                    ui.close();
-                }
                 if ui.button("Graph").clicked() {
                     self.graph_open = true;
                     ui.close();
                 }
-                ui.checkbox(&mut self.fahrenheit, "Fahrenheit");
-                ui.checkbox(&mut self.green_mode, "Green mode");
+                ui.menu_button("Advanced Features", |ui| {
+                    if ui.button("Health Status Setting").clicked() {
+                        self.begin_settings();
+                        self.health_dialog = true;
+                        ui.close();
+                    }
+                    if ui.button("Temperature Setting").clicked() {
+                        self.begin_settings();
+                        self.temperature_dialog = true;
+                        ui.close();
+                    }
+                    ui.menu_button("Temperature", |ui| {
+                        if ui
+                            .selectable_value(&mut self.fahrenheit, false, "Celsius")
+                            .changed()
+                        {
+                            self.settings.fahrenheit = self.fahrenheit;
+                            save_settings(&self.settings);
+                        }
+                        if ui
+                            .selectable_value(&mut self.fahrenheit, true, "Fahrenheit")
+                            .changed()
+                        {
+                            self.settings.fahrenheit = self.fahrenheit;
+                            save_settings(&self.settings);
+                        }
+                    });
+                    if ui.checkbox(&mut self.green_mode, "Green mode").changed() {
+                        self.settings.green_mode = self.green_mode;
+                        save_settings(&self.settings);
+                    }
+                });
                 ui.menu_button("Raw Values", |ui| {
                     for (label, format) in [
                         ("16 [HEX]", RawFormat::Hex),
@@ -385,10 +447,14 @@ impl DiskInfoApp {
             ui.menu_button("Theme", |ui| {
                 if ui.selectable_label(self.dark_theme, "Dark").clicked() {
                     self.dark_theme = true;
+                    self.settings.dark_theme = true;
+                    save_settings(&self.settings);
                     ui.close();
                 }
                 if ui.selectable_label(!self.dark_theme, "Light").clicked() {
                     self.dark_theme = false;
+                    self.settings.dark_theme = false;
+                    save_settings(&self.settings);
                     ui.close();
                 }
             });
@@ -678,7 +744,8 @@ fn drive_view(
     hide_serial: bool,
     green_mode: bool,
     raw_format: RawFormat,
-) {
+) -> Option<bool> {
+    let mut open_setting = None;
     ui.vertical(|ui| {
         let (status, color) = status_label_with_settings(drive, settings, green_mode);
         let model_capacity = format!(
@@ -698,39 +765,45 @@ fn drive_view(
                     Layout::top_down(Align::Min),
                     |ui| {
                         ui.label(RichText::new("Health Status").weak().size(11.0));
-                        egui::Frame::group(ui.style()).show(ui, |ui| {
-                            ui.set_min_size(Vec2::new(100.0, 34.0));
-                            ui.centered_and_justified(|ui| {
-                                ui.colored_label(color, RichText::new(status).strong());
-                            });
-                        });
+                        if ui
+                            .add_sized(
+                                Vec2::new(100.0, 34.0),
+                                egui::Button::new(RichText::new(status).strong().color(color)),
+                            )
+                            .clicked()
+                        {
+                            open_setting = Some(true);
+                        }
                         ui.add_space(8.0);
                         ui.label(RichText::new("Temperature").weak().size(11.0));
-                        egui::Frame::group(ui.style()).show(ui, |ui| {
-                            ui.set_min_size(Vec2::new(100.0, 34.0));
-                            ui.centered_and_justified(|ui| {
-                                let temperature = drive
-                                    .temperature_c
-                                    .map(|value| show_temperature(value, fahrenheit))
-                                    .unwrap_or_else(|| {
-                                        if fahrenheit { "-- °F" } else { "-- °C" }.into()
-                                    });
-                                let temperature_color = drive
-                                    .temperature_c
-                                    .map(|temperature| {
-                                        if temperature >= i64::from(settings.temperature_alarm) {
-                                            Color32::from_rgb(234, 77, 77)
-                                        } else {
-                                            color
-                                        }
-                                    })
-                                    .unwrap_or(color);
-                                ui.colored_label(
-                                    temperature_color,
-                                    RichText::new(temperature).size(18.0).strong(),
-                                );
-                            });
-                        });
+                        let temperature = drive
+                            .temperature_c
+                            .map(|value| show_temperature(value, fahrenheit))
+                            .unwrap_or_else(|| if fahrenheit { "-- °F" } else { "-- °C" }.into());
+                        let temperature_color = drive
+                            .temperature_c
+                            .map(|temperature| {
+                                if temperature >= i64::from(settings.temperature_alarm) {
+                                    Color32::from_rgb(234, 77, 77)
+                                } else {
+                                    color
+                                }
+                            })
+                            .unwrap_or(color);
+                        if ui
+                            .add_sized(
+                                Vec2::new(100.0, 34.0),
+                                egui::Button::new(
+                                    RichText::new(temperature)
+                                        .size(18.0)
+                                        .strong()
+                                        .color(temperature_color),
+                                ),
+                            )
+                            .clicked()
+                        {
+                            open_setting = Some(false);
+                        }
                         if let Some(life) = drive.health_percent {
                             ui.add_space(8.0);
                             ui.label(RichText::new("Life").weak().size(11.0));
@@ -769,6 +842,7 @@ fn drive_view(
             );
         }
     });
+    open_setting
 }
 
 fn metadata_column(ui: &mut egui::Ui, drive: &Drive, hide_serial: bool, fahrenheit: bool) {
