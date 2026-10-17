@@ -4,7 +4,7 @@ A native Linux and Rust port of CrystalDiskInfo. This project retains the suppli
 
 ## Current implementation
 
-- GTK4 desktop interface for selecting a drive and viewing health and device details.
+- egui/eframe desktop interface for selecting a drive and viewing health and device details.
 - Linux block device enumeration through `/sys/block`.
 - SMART status and common NVMe and ATA fields through `smartctl` JSON output.
 - NVMe health log counters and ATA SMART attribute tables in the drive detail view.
@@ -14,16 +14,16 @@ SMART access depends on `smartmontools` and permissions to access the relevant d
 
 ## Build and run
 
-Requirements: Rust (Cargo), GTK4 development libraries, and optionally `smartmontools`.
+Requirements: Rust (Cargo) and optionally `smartmontools`. The desktop UI uses eframe with Wayland and X11 support.
 
 ```sh
 cargo run --release
 ```
 
-On Arch Linux, install GTK4 and smartmontools with the system package manager:
+On Arch Linux, install smartmontools with the system package manager if SMART data is needed:
 
 ```sh
-sudo pacman -S gtk4 smartmontools
+sudo pacman -S smartmontools
 ```
 
 ## Source and license
