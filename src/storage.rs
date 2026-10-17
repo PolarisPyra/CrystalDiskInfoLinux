@@ -18,6 +18,9 @@ pub struct Drive {
     pub power_on_hours: Option<u64>,
     pub health_percent: Option<u8>,
     pub smart_status: Option<bool>,
+    pub nvme_critical_warning: Option<u8>,
+    pub nvme_available_spare: Option<u8>,
+    pub nvme_available_spare_threshold: Option<u8>,
     pub assessment: String,
     pub smart_available: bool,
     pub note: Option<String>,
@@ -243,6 +246,9 @@ fn merge_smart(drive: &mut Drive, result: SmartctlEnvelope) {
     let mut has_nvme_smart_data = false;
     if let Some(nvme) = data.nvme_smart_health_information_log {
         has_nvme_smart_data = true;
+        drive.nvme_critical_warning = nvme.critical_warning;
+        drive.nvme_available_spare = nvme.available_spare;
+        drive.nvme_available_spare_threshold = nvme.available_spare_threshold;
         drive.power_cycles = nvme.power_cycles.or(drive.power_cycles);
         if nvme.critical_warning.is_some_and(|warning| warning != 0) {
             drive.smart_status = Some(false);
@@ -322,7 +328,7 @@ fn merge_smart(drive: &mut Drive, result: SmartctlEnvelope) {
                     failed: attribute
                         .when_failed
                         .as_deref()
-                        .is_some_and(|s| s != "-" && !s.is_empty()),
+                        .is_some_and(|status| status.eq_ignore_ascii_case("FAILING_NOW")),
                 });
             }
             let raw = attribute.raw;

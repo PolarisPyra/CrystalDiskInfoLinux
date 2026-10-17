@@ -979,7 +979,14 @@ impl DiskInfoApp {
                     .map(|value| show_temperature(value, self.fahrenheit))
                     .unwrap_or_else(|| "Unavailable".into())
             );
-            let _ = writeln!(report, "   Health Status : {}", drive.assessment);
+            let settings = self
+                .settings
+                .drives
+                .get(&drive.name)
+                .cloned()
+                .unwrap_or_else(|| DriveSettings::defaults(drive));
+            let (health_status, _) = status_label_with_settings(drive, &settings, self.green_mode);
+            let _ = writeln!(report, "   Health Status : {health_status}");
             let _ = writeln!(report, "    Drive Letter : {}", drive.drive_map.join(", "));
             if !drive.ata_attributes.is_empty() {
                 report.push_str("\n-- S.M.A.R.T. --------------------------------------------------------------\n");
@@ -1340,6 +1347,10 @@ fn drive_view(
     let mut open_setting = None;
     ui.vertical(|ui| {
         let (status, color) = status_label_with_settings(drive, settings, green_mode);
+        let status_text = drive
+            .health_percent
+            .map(|life| format!("{status}\n{life} %"))
+            .unwrap_or_else(|| status.to_string());
         ui.horizontal(|ui| {
             if ui
                 .add_sized(Vec2::new(28.0, 24.0), egui::Button::new("‹"))
@@ -1376,7 +1387,7 @@ fn drive_view(
                         if ui
                             .add_sized(
                                 Vec2::new(100.0, 60.0),
-                                egui::Button::new(RichText::new(status).strong().color(color)),
+                                egui::Button::new(RichText::new(status_text).strong().color(color)),
                             )
                             .clicked()
                         {
@@ -1389,16 +1400,16 @@ fn drive_view(
                             .temperature_c
                             .map(|value| show_temperature(value, fahrenheit))
                             .unwrap_or_else(|| if fahrenheit { "-- °F" } else { "-- °C" }.into());
-                        let temperature_color = drive
-                            .temperature_c
-                            .map(|temperature| {
-                                if temperature >= i64::from(settings.temperature_alarm) {
-                                    Color32::from_rgb(234, 77, 77)
-                                } else {
-                                    color
-                                }
-                            })
-                            .unwrap_or(color);
+                        let temperature_color = match drive.temperature_c {
+                            Some(temperature)
+                                if temperature >= i64::from(settings.temperature_alarm) =>
+                            {
+                                Color32::from_rgb(234, 77, 77)
+                            }
+                            Some(_) if green_mode => Color32::from_rgb(87, 205, 95),
+                            Some(_) => Color32::from_rgb(55, 181, 118),
+                            None => Color32::from_rgb(145, 150, 160),
+                        };
                         if ui
                             .add_sized(
                                 Vec2::new(100.0, 40.0),
@@ -1532,19 +1543,13 @@ fn ata_attribute_table(
                         ui.label(RichText::new(heading).weak().size(11.0));
                     }
                     ui.end_row();
+                    let ssd = drive
+                        .rotation_rate
+                        .as_deref()
+                        .is_some_and(|rate| rate == "SSD" || rate == "0");
                     for attribute in &drive.ata_attributes {
-                        let threshold = match attribute.id {
-                            0x05 => settings.threshold_05,
-                            0xC5 => settings.threshold_c5,
-                            0xC6 => settings.threshold_c6,
-                            _ => 0,
-                        };
-                        let caution = threshold > 0
-                            && attribute
-                                .raw_value
-                                .is_some_and(|raw| raw >= threshold as u64);
-                        let failed = attribute.failed
-                            || (attribute.threshold > 0 && attribute.current < attribute.threshold);
+                        let caution = ata_raw_caution(attribute, settings, ssd);
+                        let failed = ata_attribute_failed(attribute, ssd);
                         let (label, color) = if failed {
                             ("BAD", Color32::from_rgb(234, 77, 77))
                         } else if caution {
@@ -1630,13 +1635,51 @@ fn nvme_table(ui: &mut egui::Ui, drive: &Drive) {
         });
 }
 
-fn status_label(drive: &Drive, green_mode: bool) -> (&'static str, Color32) {
-    match drive.smart_status {
-        Some(false) => ("Bad", Color32::from_rgb(234, 77, 77)),
-        Some(true) if green_mode => ("Good", Color32::from_rgb(87, 205, 95)),
-        Some(true) => ("Good", Color32::from_rgb(55, 181, 118)),
-        None => ("Unknown", Color32::from_rgb(145, 150, 160)),
+fn is_normalized_health_attribute(id: u8) -> bool {
+    matches!(
+        id,
+        0x01..=0x0D
+            | 0x16
+            | 0xBB..=0xBD
+            | 0xBF..=0xC1
+            | 0xC3..=0xD1
+            | 0xD3..=0xD4
+            | 0xDC..=0xE4
+            | 0xE6..=0xE7
+            | 0xF0
+            | 0xFA
+            | 0xFE
+    )
+}
+
+fn ata_attribute_failed(attribute: &storage::AtaSmartAttribute, ssd: bool) -> bool {
+    if attribute.id == 0xC2 {
+        return false;
     }
+    attribute.failed
+        || (attribute.threshold > 0
+            && (ssd || is_normalized_health_attribute(attribute.id))
+            && attribute.current < attribute.threshold)
+}
+
+fn ata_raw_caution(
+    attribute: &storage::AtaSmartAttribute,
+    settings: &DriveSettings,
+    ssd: bool,
+) -> bool {
+    if ssd {
+        return false;
+    }
+    let threshold = match attribute.id {
+        0x05 => settings.threshold_05,
+        0xC5 => settings.threshold_c5,
+        0xC6 => settings.threshold_c6,
+        _ => return false,
+    };
+    threshold > 0
+        && attribute
+            .raw_value
+            .is_some_and(|raw| raw & 0xFFFF_FFFF != 0xFFFF_FFFF && (raw as u16) >= threshold as u16)
 }
 
 fn status_label_with_settings(
@@ -1644,47 +1687,86 @@ fn status_label_with_settings(
     settings: &DriveSettings,
     green_mode: bool,
 ) -> (&'static str, Color32) {
+    let bad = ("Bad", Color32::from_rgb(234, 77, 77));
+    let caution_status = ("Caution", Color32::from_rgb(224, 170, 55));
+    let unknown = ("Unknown", Color32::from_rgb(145, 150, 160));
+    let good = if green_mode {
+        ("Good", Color32::from_rgb(87, 205, 95))
+    } else {
+        ("Good", Color32::from_rgb(55, 181, 118))
+    };
+
+    if drive.kind.eq_ignore_ascii_case("NVMe") || drive.nvme_critical_warning.is_some() {
+        let model = drive.model.to_ascii_lowercase();
+        if ["parallels", "vmware", "qemu"]
+            .iter()
+            .any(|virtualizer| model.starts_with(virtualizer))
+        {
+            return unknown;
+        }
+        if drive
+            .nvme_critical_warning
+            .is_some_and(|warning| warning != 0)
+            || drive.smart_status == Some(false)
+        {
+            return bad;
+        }
+        let spare = drive.nvme_available_spare;
+        let spare_threshold = drive.nvme_available_spare_threshold;
+        if let (Some(spare), Some(threshold)) = (spare, spare_threshold)
+            && threshold > 0
+            && threshold <= 100
+        {
+            if spare < threshold {
+                return bad;
+            }
+            if spare == threshold && threshold != 100 {
+                return caution_status;
+            }
+        }
+        if drive
+            .health_percent
+            .is_some_and(|life| i32::from(life) <= settings.threshold_ff)
+        {
+            return caution_status;
+        }
+        if drive.smart_status == Some(true) || drive.nvme_critical_warning.is_some() {
+            return good;
+        }
+        return unknown;
+    }
+
+    if drive.smart_status == Some(false) {
+        return bad;
+    }
+
     let mut caution = false;
     let ssd = drive
         .rotation_rate
         .as_deref()
         .is_some_and(|rate| rate == "SSD" || rate == "0");
+    let mut has_health_indicator = false;
     for attribute in &drive.ata_attributes {
-        let threshold = if ssd && attribute.id == 0x05 {
-            settings.threshold_ff
-        } else {
-            match attribute.id {
-                0x05 => settings.threshold_05,
-                0xC5 => settings.threshold_c5,
-                0xC6 => settings.threshold_c6,
-                _ => 0,
-            }
-        };
-        if threshold > 0
-            && attribute.raw_value.is_some_and(|raw| {
-                if ssd && attribute.id == 0x05 {
-                    100u64.saturating_sub(raw.min(100)) <= threshold as u64
-                } else {
-                    raw >= threshold as u64
-                }
-            })
-        {
-            caution = true;
+        let raw_health_id = matches!(attribute.id, 0x05 | 0xC5 | 0xC6);
+
+        if raw_health_id && !ssd {
+            has_health_indicator = true;
+            caution |= ata_raw_caution(attribute, settings, ssd);
+        }
+
+        if ssd && attribute.threshold > 0 {
+            has_health_indicator = true;
+        }
+
+        if ata_attribute_failed(attribute, ssd) {
+            return bad;
         }
     }
-    let (base_status, base_color) = status_label(drive, green_mode);
-    if drive
-        .temperature_c
-        .is_some_and(|temperature| temperature >= i64::from(settings.temperature_alarm))
-        && base_status != "Bad"
-    {
-        return ("Bad", Color32::from_rgb(234, 77, 77));
+
+    if !has_health_indicator || !drive.smart_available {
+        return unknown;
     }
-    if base_status == "Good" && caution {
-        ("Caution", Color32::from_rgb(224, 170, 55))
-    } else {
-        (base_status, base_color)
-    }
+    if caution { caution_status } else { good }
 }
 
 fn show_temperature(celsius: i64, fahrenheit: bool) -> String {
