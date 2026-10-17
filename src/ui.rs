@@ -97,6 +97,8 @@ struct UserSettings {
     hide_smart_info: bool,
     #[serde(default = "default_hide_no_smart_disk")]
     hide_no_smart_disk: bool,
+    #[serde(default = "default_hide_raid_volume")]
+    hide_raid_volume: bool,
     #[serde(default = "default_auto_refresh_minutes")]
     auto_refresh_minutes: u32,
     #[serde(default)]
@@ -119,6 +121,7 @@ impl Default for UserSettings {
             ascii_view: false,
             hide_smart_info: false,
             hide_no_smart_disk: true,
+            hide_raid_volume: default_hide_raid_volume(),
             auto_refresh_minutes: default_auto_refresh_minutes(),
             raw_values: 0,
             auto_detection_seconds: 0,
@@ -131,6 +134,10 @@ fn default_dark_theme() -> bool {
 }
 
 fn default_hide_no_smart_disk() -> bool {
+    true
+}
+
+fn default_hide_raid_volume() -> bool {
     true
 }
 
@@ -358,17 +365,22 @@ impl DiskInfoApp {
 
     fn current_drive(&self) -> Option<&Drive> {
         self.drives.iter().find(|drive| {
-            Some(drive.name.as_str()) == self.selected.as_deref()
-                && (!self.settings.hide_no_smart_disk || drive.smart_available)
+            Some(drive.name.as_str()) == self.selected.as_deref() && self.drive_visible(drive)
         })
     }
 
     fn visible_drives(&self) -> Vec<Drive> {
         self.drives
             .iter()
-            .filter(|drive| !self.settings.hide_no_smart_disk || drive.smart_available)
+            .filter(|drive| self.drive_visible(drive))
             .cloned()
             .collect()
+    }
+
+    fn drive_visible(&self, drive: &Drive) -> bool {
+        (!self.settings.hide_no_smart_disk || drive.smart_available)
+            && (!self.settings.hide_raid_volume
+                || !drive.model.to_ascii_uppercase().contains("RAID"))
     }
 
     fn set_interval(&mut self, seconds: Option<f64>) {
@@ -506,9 +518,9 @@ impl eframe::App for DiskInfoApp {
                     ui.centered_and_justified(|ui| {
                         ui.colored_label(Color32::LIGHT_RED, error);
                     });
-                } else if !self.drives.is_empty() && self.settings.hide_no_smart_disk {
+                } else if !self.drives.is_empty() {
                     ui.centered_and_justified(|ui| {
-                        ui.label("No disks with S.M.A.R.T. data are shown.");
+                        ui.label("No disks match the current filters.");
                     });
                 } else {
                     ui.centered_and_justified(|ui| ui.label("No storage devices found."));
@@ -759,6 +771,20 @@ impl DiskInfoApp {
                         &mut self.settings.hide_no_smart_disk,
                         "Hide No S.M.A.R.T. Disk",
                     )
+                    .changed()
+                {
+                    save_settings(&self.settings);
+                    let visible = self.visible_drives();
+                    if self
+                        .selected
+                        .as_ref()
+                        .is_none_or(|selected| !visible.iter().any(|drive| &drive.name == selected))
+                    {
+                        self.selected = visible.first().map(|drive| drive.name.clone());
+                    }
+                }
+                if ui
+                    .checkbox(&mut self.settings.hide_raid_volume, "Hide RAID Volume")
                     .changed()
                 {
                     save_settings(&self.settings);
