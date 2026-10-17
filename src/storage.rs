@@ -14,6 +14,8 @@ pub struct Drive {
     pub drive_map: Vec<String>,
     pub rotation_rate: Option<String>,
     pub power_cycles: Option<u64>,
+    pub host_reads_gb: Option<u64>,
+    pub host_writes_gb: Option<u64>,
     pub temperature_c: Option<i64>,
     pub power_on_hours: Option<u64>,
     pub health_percent: Option<u8>,
@@ -309,6 +311,8 @@ fn merge_smart(drive: &mut Drive, result: SmartctlEnvelope) {
         drive.nvme_available_spare = nvme.available_spare;
         drive.nvme_available_spare_threshold = nvme.available_spare_threshold;
         drive.power_cycles = nvme.power_cycles.or(drive.power_cycles);
+        drive.host_reads_gb = nvme.data_units_read.map(nvme_data_units_to_gb);
+        drive.host_writes_gb = nvme.data_units_written.map(nvme_data_units_to_gb);
         if nvme.critical_warning.is_some_and(|warning| warning != 0) {
             drive.smart_status = Some(false);
         } else if drive.smart_status.is_none() {
@@ -540,6 +544,10 @@ fn merge_smart(drive: &mut Drive, result: SmartctlEnvelope) {
         drive.note = Some("The device could not be opened for SMART queries.".into());
     }
     let _ = result.device.and_then(|v| v.name);
+}
+
+fn nvme_data_units_to_gb(data_units: u64) -> u64 {
+    data_units.wrapping_mul(1000) >> 21
 }
 
 fn mounted_paths(device: &str) -> Vec<String> {

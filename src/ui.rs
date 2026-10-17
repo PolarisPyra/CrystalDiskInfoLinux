@@ -2141,8 +2141,26 @@ fn metadata_column_secondary(ui: &mut egui::Ui, drive: &Drive) {
         .num_columns(2)
         .spacing(Vec2::new(12.0, 4.0))
         .show(ui, |ui| {
-            metadata(ui, "Buffer Size", "Unavailable");
-            metadata(ui, "NV Cache Size", "Unavailable");
+            if let Some(host_reads_gb) = drive.host_reads_gb {
+                metadata_with_tooltip(
+                    ui,
+                    "Total Host Reads",
+                    &format!("{host_reads_gb} GB"),
+                    storage_total_tooltip(host_reads_gb),
+                );
+            } else {
+                metadata(ui, "Buffer Size", "Unavailable");
+            }
+            if let Some(host_writes_gb) = drive.host_writes_gb {
+                metadata_with_tooltip(
+                    ui,
+                    "Total Host Writes",
+                    &format!("{host_writes_gb} GB"),
+                    storage_total_tooltip(host_writes_gb),
+                );
+            } else {
+                metadata(ui, "NV Cache Size", "Unavailable");
+            }
             metadata(ui, "Rotation Rate", option(&drive.rotation_rate));
             metadata(
                 ui,
@@ -2167,6 +2185,27 @@ fn metadata(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.label(RichText::new(label).weak());
     ui.label(value);
     ui.end_row();
+}
+
+fn metadata_with_tooltip(ui: &mut egui::Ui, label: &str, value: &str, tooltip: Option<String>) {
+    ui.label(RichText::new(label).weak());
+    let value = ui.label(value);
+    if let Some(tooltip) = tooltip {
+        value.on_hover_text(tooltip);
+    }
+    ui.end_row();
+}
+
+fn storage_total_tooltip(gigabytes: u64) -> Option<String> {
+    if gigabytes > 1024 * 1024 {
+        Some(format!("{:.3} PB", gigabytes as f64 / 1024.0 / 1024.0))
+    } else if gigabytes > 1024 {
+        Some(format!("{:.3} TB", gigabytes as f64 / 1024.0))
+    } else if gigabytes > 0 {
+        Some(format!("{gigabytes} GB"))
+    } else {
+        None
+    }
 }
 
 fn ata_attribute_table(
