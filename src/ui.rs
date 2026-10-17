@@ -79,6 +79,7 @@ pub struct DiskInfoApp {
     save_image_receiver: Option<mpsc::Receiver<Result<(), String>>>,
     save_image_pending: bool,
     save_image_capture_requested: bool,
+    startup_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -114,6 +115,8 @@ struct UserSettings {
     auto_detection_seconds: u32,
     #[serde(default)]
     event_log: bool,
+    #[serde(default)]
+    startup_enabled: bool,
     #[serde(default = "default_alert_sound")]
     alert_sound: bool,
     #[serde(default)]
@@ -141,6 +144,7 @@ impl Default for UserSettings {
             raw_values: 0,
             auto_detection_seconds: 0,
             event_log: false,
+            startup_enabled: false,
             alert_sound: true,
             alert_sound_path: String::new(),
             alert_sound_volume: default_alert_sound_volume(),
@@ -381,6 +385,99 @@ fn settings_path() -> std::path::PathBuf {
     base.join("viperdiskinfo").join("settings.json")
 }
 
+fn autostart_path() -> Result<std::path::PathBuf, String> {
+    let config_dir = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
+        })
+        .ok_or_else(|| "Could not determine the user's configuration directory.".to_string())?;
+    Ok(config_dir.join("autostart/viperdiskinfo.desktop"))
+}
+
+const AUTOSTART_MARKER: &str = "X-ViperDiskInfo-Autostart=true";
+
+fn autostart_enabled() -> bool {
+    autostart_path()
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .is_some_and(|entry| entry.lines().any(|line| line == AUTOSTART_MARKER))
+}
+
+fn set_autostart_enabled(enabled: bool) -> Result<(), String> {
+    let path = autostart_path()?;
+    if enabled {
+        if path.exists() {
+            let content = std::fs::read_to_string(&path)
+                .map_err(|error| format!("Could not read existing autostart entry: {error}"))?;
+            if !content.lines().any(|line| line == AUTOSTART_MARKER) {
+                return Err(format!(
+                    "{} already exists and is not managed by Viper Disk Info.",
+                    path.display()
+                ));
+            }
+        }
+        let executable = if let Some(appimage) = std::env::var_os("APPIMAGE") {
+            std::path::PathBuf::from(appimage)
+        } else {
+            std::env::current_exe()
+                .map_err(|error| format!("Could not locate the application: {error}"))?
+        };
+        let exec = desktop_exec_quoted(&executable);
+        let entry = format!(
+            "[Desktop Entry]\nType=Application\nName=Viper Disk Info\nComment=Monitor disk health\nExec={exec}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n{AUTOSTART_MARKER}\n"
+        );
+        let parent = path
+            .parent()
+            .ok_or_else(|| "Could not determine the autostart directory.".to_string())?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create autostart directory: {error}"))?;
+        let temporary = path.with_extension(format!("desktop.{}.tmp", std::process::id()));
+        if temporary.exists() {
+            return Err(format!(
+                "Temporary autostart file already exists: {}",
+                temporary.display()
+            ));
+        }
+        if let Err(error) = std::fs::write(&temporary, entry) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(format!("Could not write autostart entry: {error}"));
+        }
+        if let Err(error) = std::fs::rename(&temporary, &path) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(format!("Could not install autostart entry: {error}"));
+        }
+    } else if path.exists() {
+        let content = std::fs::read_to_string(&path)
+            .map_err(|error| format!("Could not read autostart entry: {error}"))?;
+        if !content.lines().any(|line| line == AUTOSTART_MARKER) {
+            return Err(format!(
+                "{} is not managed by Viper Disk Info, so it was left in place.",
+                path.display()
+            ));
+        }
+        std::fs::remove_file(&path)
+            .map_err(|error| format!("Could not remove autostart entry: {error}"))?;
+    }
+    Ok(())
+}
+
+fn desktop_exec_quoted(path: &std::path::Path) -> String {
+    let mut quoted = String::from("\"");
+    for character in path.to_string_lossy().chars() {
+        if character == '%' {
+            quoted.push_str("%%");
+            continue;
+        }
+        if matches!(character, '\\' | '"' | '$' | '`') {
+            quoted.push('\\');
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    quoted
+}
+
 fn legacy_settings_path() -> std::path::PathBuf {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
@@ -411,7 +508,8 @@ fn save_settings(settings: &UserSettings) {
 impl DiskInfoApp {
     pub fn new(context: &eframe::CreationContext<'_>) -> Self {
         context.egui_ctx.set_visuals(egui::Visuals::dark());
-        let settings = load_settings();
+        let mut settings = load_settings();
+        settings.startup_enabled = autostart_enabled();
         let raw_format = raw_format_from_setting(settings.raw_values);
         let auto_refresh_seconds = auto_refresh_interval(settings.auto_refresh_minutes);
         let logo_texture = load_logo(&context.egui_ctx);
@@ -452,6 +550,7 @@ impl DiskInfoApp {
             save_image_receiver: None,
             save_image_pending: false,
             save_image_capture_requested: false,
+            startup_error: None,
         };
         app.hide_serial = app.settings.hide_serial;
         app.fahrenheit = app.settings.fahrenheit;
@@ -905,6 +1004,25 @@ impl DiskInfoApp {
                 if ui.button("Refresh     F5").clicked() {
                     self.start_scan(context.clone());
                     ui.close();
+                }
+                if ui
+                    .checkbox(&mut self.settings.startup_enabled, "Startup")
+                    .changed()
+                {
+                    let enable = self.settings.startup_enabled;
+                    match set_autostart_enabled(enable) {
+                        Ok(()) => {
+                            self.startup_error = None;
+                            save_settings(&self.settings);
+                        }
+                        Err(error) => {
+                            self.settings.startup_enabled = !enable;
+                            self.startup_error = Some(error);
+                        }
+                    }
+                }
+                if let Some(error) = &self.startup_error {
+                    ui.colored_label(Color32::LIGHT_RED, error);
                 }
                 ui.menu_button("Auto Refresh", |ui| {
                     for (label, interval) in [

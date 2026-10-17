@@ -16,6 +16,8 @@ SMART access depends on `smartmontools` and permissions to access the relevant d
 
 Health and temperature alerts use the desktop notification service through `notify-send` (provided by `libnotify`). Alert sounds use `paplay` or fall back to `canberra-gtk-play`. Configure the sound file and volume in **Function > Alert Features > Sound Settings**. Health alerts can be disabled per drive in **Function > Advanced Features > Health Status Setting**. Set a drive's temperature alarm to 0 °C to disable its temperature alerts. **Function > Alert Features > Event Log** appends alert records to `$XDG_STATE_HOME/viperdiskinfo/events.jsonl` (or `~/.local/state/viperdiskinfo/events.jsonl`).
 
+**Function > Startup** creates or removes the user's `autostart/viperdiskinfo.desktop` entry. Existing entries with that filename that are not owned by Viper Disk Info are left untouched.
+
 ## Build and run
 
 Requirements: Rust (Cargo) and optionally `smartmontools`. The desktop UI uses eframe with Wayland and X11 support.
