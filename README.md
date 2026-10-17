@@ -9,7 +9,7 @@ A native Linux disk health application written in Rust with egui. It uses Crysta
 - Linux block device enumeration through `/sys/block`.
 - SMART status and common NVMe and ATA fields through `smartctl` JSON output.
 - NVMe health log counters and ATA SMART attribute tables in the drive detail view.
-- Fahrenheit display, green mode, serial hiding, SMART-table hiding, automatic refresh intervals, raw-value formats, report copying, and temperature history graph.
+- Fahrenheit display, green mode, serial hiding, SMART-table hiding, no-SMART drive filtering, automatic refresh intervals, raw-value formats, report copying, and temperature history graph.
 - Capacity and drive metadata fallbacks from sysfs when SMART access is unavailable.
 
 SMART access depends on `smartmontools` and permissions to access the relevant device. Values that the operating system or device does not expose are shown as unavailable. The port is in progress; vendor-specific controller support and the full CrystalDiskInfo feature set are not implemented yet.

@@ -240,7 +240,9 @@ fn merge_smart(drive: &mut Drive, result: SmartctlEnvelope) {
             rotation_rate.as_str().unwrap_or_default().to_string()
         });
     }
+    let mut has_nvme_smart_data = false;
     if let Some(nvme) = data.nvme_smart_health_information_log {
+        has_nvme_smart_data = true;
         drive.power_cycles = nvme.power_cycles.or(drive.power_cycles);
         if nvme.critical_warning.is_some_and(|warning| warning != 0) {
             drive.smart_status = Some(false);
@@ -347,10 +349,7 @@ fn merge_smart(drive: &mut Drive, result: SmartctlEnvelope) {
             attribute.failed || (attribute.threshold > 0 && attribute.current < attribute.threshold)
         }));
     }
-    drive.smart_available = drive.smart_status.is_some()
-        || drive.temperature_c.is_some()
-        || drive.power_on_hours.is_some()
-        || drive.health_percent.is_some();
+    drive.smart_available = !drive.ata_attributes.is_empty() || has_nvme_smart_data;
     drive.assessment = match drive.smart_status {
         Some(true) => "Good".into(),
         Some(false) => "Warning".into(),

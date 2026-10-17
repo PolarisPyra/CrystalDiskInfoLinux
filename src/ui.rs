@@ -93,6 +93,8 @@ struct UserSettings {
     ascii_view: bool,
     #[serde(default)]
     hide_smart_info: bool,
+    #[serde(default = "default_hide_no_smart_disk")]
+    hide_no_smart_disk: bool,
 }
 
 impl Default for UserSettings {
@@ -108,11 +110,16 @@ impl Default for UserSettings {
             dump_smart_threshold: false,
             ascii_view: false,
             hide_smart_info: false,
+            hide_no_smart_disk: true,
         }
     }
 }
 
 fn default_dark_theme() -> bool {
+    true
+}
+
+fn default_hide_no_smart_disk() -> bool {
     true
 }
 
@@ -273,14 +280,15 @@ impl DiskInfoApp {
                         }
                     }
                 }
+                self.drives = drives;
+                let visible = self.visible_drives();
                 if self
                     .selected
                     .as_ref()
-                    .is_none_or(|selected| !drives.iter().any(|drive| &drive.name == selected))
+                    .is_none_or(|selected| !visible.iter().any(|drive| &drive.name == selected))
                 {
-                    self.selected = drives.first().map(|drive| drive.name.clone());
+                    self.selected = visible.first().map(|drive| drive.name.clone());
                 }
-                self.drives = drives;
                 self.loading = false;
                 self.last_scan_time = context.input(|input| input.time);
             }
@@ -296,9 +304,18 @@ impl DiskInfoApp {
     }
 
     fn current_drive(&self) -> Option<&Drive> {
+        self.drives.iter().find(|drive| {
+            Some(drive.name.as_str()) == self.selected.as_deref()
+                && (!self.settings.hide_no_smart_disk || drive.smart_available)
+        })
+    }
+
+    fn visible_drives(&self) -> Vec<Drive> {
         self.drives
             .iter()
-            .find(|drive| Some(drive.name.as_str()) == self.selected.as_deref())
+            .filter(|drive| !self.settings.hide_no_smart_disk || drive.smart_available)
+            .cloned()
+            .collect()
     }
 
     fn set_interval(&mut self, seconds: Option<f64>) {
@@ -382,23 +399,27 @@ impl eframe::App for DiskInfoApp {
                         self.settings.hide_smart_info,
                     );
                     match clicked_setting {
-                        Some(DriveViewAction::PreviousDrive) if !self.drives.is_empty() => {
-                            let index = self
-                                .drives
-                                .iter()
-                                .position(|item| item.name == drive.name)
-                                .unwrap_or_default();
-                            let previous = (index + self.drives.len() - 1) % self.drives.len();
-                            self.selected = Some(self.drives[previous].name.clone());
+                        Some(DriveViewAction::PreviousDrive) => {
+                            let visible = self.visible_drives();
+                            if !visible.is_empty() {
+                                let index = visible
+                                    .iter()
+                                    .position(|item| item.name == drive.name)
+                                    .unwrap_or_default();
+                                let previous = (index + visible.len() - 1) % visible.len();
+                                self.selected = Some(visible[previous].name.clone());
+                            }
                         }
-                        Some(DriveViewAction::NextDrive) if !self.drives.is_empty() => {
-                            let index = self
-                                .drives
-                                .iter()
-                                .position(|item| item.name == drive.name)
-                                .unwrap_or_default();
-                            self.selected =
-                                Some(self.drives[(index + 1) % self.drives.len()].name.clone());
+                        Some(DriveViewAction::NextDrive) => {
+                            let visible = self.visible_drives();
+                            if !visible.is_empty() {
+                                let index = visible
+                                    .iter()
+                                    .position(|item| item.name == drive.name)
+                                    .unwrap_or_default();
+                                self.selected =
+                                    Some(visible[(index + 1) % visible.len()].name.clone());
+                            }
                         }
                         Some(DriveViewAction::HealthSetting) => {
                             self.begin_settings();
@@ -418,6 +439,10 @@ impl eframe::App for DiskInfoApp {
                 } else if let Some(error) = &self.scan_error {
                     ui.centered_and_justified(|ui| {
                         ui.colored_label(Color32::LIGHT_RED, error);
+                    });
+                } else if !self.drives.is_empty() && self.settings.hide_no_smart_disk {
+                    ui.centered_and_justified(|ui| {
+                        ui.label("No disks with S.M.A.R.T. data are shown.");
                     });
                 } else {
                     ui.centered_and_justified(|ui| ui.label("No storage devices found."));
@@ -599,7 +624,8 @@ impl DiskInfoApp {
                 }
             });
             ui.menu_button("Disk", |ui| {
-                for drive in &self.drives {
+                let visible = self.visible_drives();
+                for drive in &visible {
                     if ui
                         .selectable_label(
                             self.selected.as_deref() == Some(&drive.name),
@@ -611,9 +637,7 @@ impl DiskInfoApp {
                         ui.close();
                     }
                 }
-                if !self.drives.is_empty() {
-                    ui.separator();
-                }
+                ui.separator();
                 if ui
                     .checkbox(
                         &mut self.settings.hide_smart_info,
@@ -630,6 +654,23 @@ impl DiskInfoApp {
                             MAIN_WINDOW_HEIGHT
                         },
                     )));
+                }
+                if ui
+                    .checkbox(
+                        &mut self.settings.hide_no_smart_disk,
+                        "Hide No S.M.A.R.T. Disk",
+                    )
+                    .changed()
+                {
+                    save_settings(&self.settings);
+                    let visible = self.visible_drives();
+                    if self
+                        .selected
+                        .as_ref()
+                        .is_none_or(|selected| !visible.iter().any(|drive| &drive.name == selected))
+                    {
+                        self.selected = visible.first().map(|drive| drive.name.clone());
+                    }
                 }
             });
             ui.menu_button("Help", |ui| {
@@ -664,8 +705,8 @@ impl DiskInfoApp {
     }
 
     fn settings_windows(&mut self, context: &egui::Context) {
-        let drive_index = self
-            .drives
+        let visible_drives = self.visible_drives();
+        let drive_index = visible_drives
             .iter()
             .position(|drive| drive.name == self.settings_drive);
         if self.temperature_dialog {
@@ -679,10 +720,10 @@ impl DiskInfoApp {
                         egui::ComboBox::from_label("Drive")
                             .selected_text(format!(
                                 "{} ({})",
-                                self.drives[index].model, self.drives[index].name
+                                visible_drives[index].model, visible_drives[index].name
                             ))
                             .show_ui(ui, |ui| {
-                                for drive in &self.drives {
+                                for drive in &visible_drives {
                                     if ui
                                         .selectable_label(
                                             drive.name == self.settings_drive,
@@ -716,10 +757,11 @@ impl DiskInfoApp {
                         ui.horizontal(|ui| {
                             if ui.button("Default").clicked() {
                                 self.temperature_draft =
-                                    DriveSettings::defaults(&self.drives[index]).temperature_alarm;
+                                    DriveSettings::defaults(&visible_drives[index])
+                                        .temperature_alarm;
                             }
                             if ui.button("Apply").clicked() {
-                                let drive = &self.drives[index];
+                                let drive = &visible_drives[index];
                                 let entry = self
                                     .settings
                                     .drives
@@ -746,10 +788,10 @@ impl DiskInfoApp {
                         egui::ComboBox::from_label("Drive")
                             .selected_text(format!(
                                 "{} ({})",
-                                self.drives[index].model, self.drives[index].name
+                                visible_drives[index].model, visible_drives[index].name
                             ))
                             .show_ui(ui, |ui| {
-                                for drive in &self.drives {
+                                for drive in &visible_drives {
                                     if ui
                                         .selectable_label(
                                             drive.name == self.settings_drive,
@@ -773,12 +815,12 @@ impl DiskInfoApp {
                                     }
                                 }
                             });
-                        let ssd = self.drives[index]
+                        let ssd = visible_drives[index]
                             .rotation_rate
                             .as_deref()
                             .is_some_and(|rate| rate == "SSD" || rate == "0");
                         if ssd {
-                            if self.drives[index].health_percent.is_some() {
+                            if visible_drives[index].health_percent.is_some() {
                                 ui.add(
                                     egui::Slider::new(&mut self.health_draft.threshold_ff, 0..=99)
                                         .text("ID FF wear threshold"),
@@ -805,7 +847,7 @@ impl DiskInfoApp {
                                 self.health_draft = HealthThresholds::default();
                             }
                             if ui.button("Apply").clicked() {
-                                let drive = &self.drives[index];
+                                let drive = &visible_drives[index];
                                 let entry = self
                                     .settings
                                     .drives
@@ -831,7 +873,8 @@ impl DiskInfoApp {
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    for (index, drive) in self.drives.iter().enumerate() {
+                    let visible = self.visible_drives();
+                    for (index, drive) in visible.iter().enumerate() {
                         let selected = self.selected.as_deref() == Some(drive.name.as_str());
                         let temperature = drive
                             .temperature_c
@@ -855,18 +898,23 @@ impl DiskInfoApp {
                             self.selected = Some(drive.name.clone());
                         }
                     }
-                    if self.drives.is_empty() && !self.loading {
-                        ui.label("No detected disks");
+                    if visible.is_empty() && !self.loading {
+                        ui.label(if self.drives.is_empty() {
+                            "No detected disks"
+                        } else {
+                            "No disks with S.M.A.R.T. data"
+                        });
                     }
                 });
             });
     }
 
     fn report_text(&self) -> String {
+        let visible_drives = self.visible_drives();
         let mut report = String::from(
             "----------------------------------------------------------------------------\nViper Disk Info\n----------------------------------------------------------------------------\n\n-- Disk List ---------------------------------------------------------------\n",
         );
-        for (index, drive) in self.drives.iter().enumerate() {
+        for (index, drive) in visible_drives.iter().enumerate() {
             let _ = writeln!(
                 report,
                 " ({:02}) {} : {} [/dev/{}]",
@@ -876,7 +924,7 @@ impl DiskInfoApp {
                 drive.name
             );
         }
-        for (index, drive) in self.drives.iter().enumerate() {
+        for (index, drive) in visible_drives.iter().enumerate() {
             let _ = writeln!(
                 report,
                 "\n----------------------------------------------------------------------------\n ({:02}) {}\n----------------------------------------------------------------------------",
