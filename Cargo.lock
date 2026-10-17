@@ -378,6 +378,7 @@ name = "crystaldiskinfo-linux"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "png",
  "serde",
  "serde_json",
 ]

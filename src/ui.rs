@@ -42,6 +42,13 @@ pub struct DiskInfoApp {
     save_text_dialog: bool,
     save_text_path: String,
     save_text_error: Option<String>,
+    save_image_dialog: bool,
+    save_image_path: String,
+    save_image_error: Option<String>,
+    save_image_overwrite: bool,
+    save_image_receiver: Option<mpsc::Receiver<Result<(), String>>>,
+    save_image_pending: bool,
+    save_image_capture_requested: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -182,6 +189,13 @@ impl DiskInfoApp {
             save_text_dialog: false,
             save_text_path: String::new(),
             save_text_error: None,
+            save_image_dialog: false,
+            save_image_path: String::new(),
+            save_image_error: None,
+            save_image_overwrite: false,
+            save_image_receiver: None,
+            save_image_pending: false,
+            save_image_capture_requested: false,
         };
         app.hide_serial = app.settings.hide_serial;
         app.fahrenheit = app.settings.fahrenheit;
@@ -262,6 +276,19 @@ impl eframe::App for DiskInfoApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let context = ui.ctx().clone();
         self.poll_scan(&context);
+        self.poll_image_save();
+        if self.save_image_capture_requested {
+            self.save_image_capture_requested = false;
+            let path = std::path::PathBuf::from(self.save_image_path.clone());
+            let (sender, receiver) = mpsc::channel();
+            self.save_image_receiver = Some(receiver);
+            let repaint = context.clone();
+            context.request_screenshot(move |image| {
+                let result = write_screenshot(&path, &image);
+                let _ = sender.send(result);
+                repaint.request_repaint();
+            });
+        }
         if let Some(interval) = self.auto_refresh_seconds
             && !self.loading
             && context.input(|input| input.time) - self.last_scan_time >= interval
@@ -357,6 +384,7 @@ impl eframe::App for DiskInfoApp {
         }
         self.settings_windows(&context);
         self.save_text_window(&context);
+        self.save_image_window(&context);
     }
 }
 
@@ -368,6 +396,13 @@ impl DiskInfoApp {
                     self.save_text_path.clear();
                     self.save_text_error = None;
                     self.save_text_dialog = true;
+                    ui.close();
+                }
+                if ui.button("Save image...").clicked() {
+                    self.save_image_path.clear();
+                    self.save_image_error = None;
+                    self.save_image_overwrite = false;
+                    self.save_image_dialog = true;
                     ui.close();
                 }
                 ui.separator();
@@ -931,6 +966,176 @@ impl DiskInfoApp {
             });
         self.save_text_dialog = open && self.save_text_dialog;
     }
+
+    fn poll_image_save(&mut self) {
+        let Some(receiver) = self.save_image_receiver.take() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(Ok(())) => {
+                self.save_image_pending = false;
+                self.save_image_dialog = false;
+                self.save_image_error = None;
+            }
+            Ok(Err(error)) => {
+                self.save_image_pending = false;
+                self.save_image_dialog = true;
+                self.save_image_error = Some(error);
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                self.save_image_receiver = Some(receiver);
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.save_image_pending = false;
+                self.save_image_dialog = true;
+                self.save_image_error = Some("Screenshot capture did not complete.".into());
+            }
+        }
+    }
+
+    fn save_image_window(&mut self, context: &egui::Context) {
+        if !self.save_image_dialog {
+            return;
+        }
+        let mut open = self.save_image_dialog;
+        egui::Window::new("Save image")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(context, |ui| {
+                ui.label("Save the current CrystalDiskInfo window as PNG or BMP.");
+                let response = ui.text_edit_singleline(&mut self.save_image_path);
+                if response.changed() {
+                    self.save_image_overwrite = false;
+                    self.save_image_error = None;
+                }
+                if self.save_image_pending {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Capturing image...");
+                    });
+                }
+                if let Some(error) = &self.save_image_error {
+                    ui.colored_label(Color32::LIGHT_RED, error);
+                }
+                ui.horizontal(|ui| {
+                    let save = ui.add_enabled(!self.save_image_pending, egui::Button::new("Save"));
+                    if save.clicked() {
+                        let path = std::path::PathBuf::from(self.save_image_path.trim());
+                        let supported =
+                            path.extension()
+                                .and_then(|ext| ext.to_str())
+                                .is_some_and(|ext| {
+                                    matches!(ext.to_ascii_lowercase().as_str(), "png" | "bmp")
+                                });
+                        if self.save_image_path.trim().is_empty() {
+                            self.save_image_error =
+                                Some("Enter a file path ending in .png or .bmp.".into());
+                        } else if !supported {
+                            self.save_image_error = Some("Choose a .png or .bmp file path.".into());
+                        } else if path.exists() && !self.save_image_overwrite {
+                            self.save_image_overwrite = true;
+                            self.save_image_error =
+                                Some("File already exists. Press Save again to replace it.".into());
+                        } else {
+                            self.save_image_pending = true;
+                            self.save_image_dialog = false;
+                            self.save_image_error = None;
+                            self.save_image_capture_requested = true;
+                            context.request_repaint();
+                        }
+                    }
+                    if ui
+                        .add_enabled(!self.save_image_pending, egui::Button::new("Cancel"))
+                        .clicked()
+                    {
+                        self.save_image_dialog = false;
+                    }
+                });
+            });
+        self.save_image_dialog = open && self.save_image_dialog;
+    }
+}
+
+fn write_screenshot(path: &std::path::Path, image: &egui::ColorImage) -> Result<(), String> {
+    let [width, height] = image.size;
+    if width == 0 || height == 0 || image.pixels.len() != width.saturating_mul(height) {
+        return Err("Screenshot image has invalid dimensions.".into());
+    }
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => {
+            let file = std::fs::File::create(path).map_err(|error| error.to_string())?;
+            let mut encoder = png::Encoder::new(file, width as u32, height as u32);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
+            let mut rgba = Vec::with_capacity(image.pixels.len() * 4);
+            for pixel in &image.pixels {
+                rgba.extend_from_slice(&pixel.to_array());
+            }
+            writer
+                .write_image_data(&rgba)
+                .map_err(|error| error.to_string())
+        }
+        Some("bmp") => write_bmp(path, width, height, image),
+        _ => Err("Choose a .png or .bmp file path.".into()),
+    }
+}
+
+fn write_bmp(
+    path: &std::path::Path,
+    width: usize,
+    height: usize,
+    image: &egui::ColorImage,
+) -> Result<(), String> {
+    use std::io::Write;
+    let byte_count = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .and_then(|bytes| u32::try_from(bytes).ok())
+        .ok_or_else(|| "Screenshot is too large for BMP format.".to_string())?;
+    let width_i32 = i32::try_from(width).map_err(|_| "Screenshot is too wide for BMP format.")?;
+    let height_i32 = i32::try_from(height).map_err(|_| "Screenshot is too tall for BMP format.")?;
+    let mut file = std::fs::File::create(path).map_err(|error| error.to_string())?;
+    file.write_all(b"BM").map_err(|error| error.to_string())?;
+    file.write_all(&(54u32 + byte_count).to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    file.write_all(&[0; 4]).map_err(|error| error.to_string())?;
+    file.write_all(&54u32.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    file.write_all(&40u32.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    file.write_all(&width_i32.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    file.write_all(&height_i32.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    file.write_all(&1u16.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    file.write_all(&32u16.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    file.write_all(&0u32.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    file.write_all(&byte_count.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    file.write_all(&2835i32.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    file.write_all(&2835i32.to_le_bytes())
+        .map_err(|error| error.to_string())?;
+    file.write_all(&[0; 8]).map_err(|error| error.to_string())?;
+    for row in (0..height).rev() {
+        let start = row * width;
+        for pixel in &image.pixels[start..start + width] {
+            let [red, green, blue, _] = pixel.to_array();
+            file.write_all(&[blue, green, red, 255])
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 fn smartctl_output(device: &str, args: &[&str], ascii_view: bool) -> String {
