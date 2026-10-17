@@ -8,6 +8,19 @@ use std::{collections::HashMap, fmt::Write as _, sync::mpsc, thread, time::Durat
 
 pub const MAIN_WINDOW_WIDTH: f32 = 1014.0;
 pub const MAIN_WINDOW_HEIGHT: f32 = 694.0;
+const MAIN_WINDOW_HIDDEN_SMART_HEIGHT: f32 = 420.0;
+
+pub fn initial_window_size() -> [f32; 2] {
+    let settings = load_settings();
+    [
+        MAIN_WINDOW_WIDTH,
+        if settings.hide_smart_info {
+            MAIN_WINDOW_HIDDEN_SMART_HEIGHT
+        } else {
+            MAIN_WINDOW_HEIGHT
+        },
+    ]
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum RawFormat {
@@ -78,6 +91,8 @@ struct UserSettings {
     dump_smart_threshold: bool,
     #[serde(default)]
     ascii_view: bool,
+    #[serde(default)]
+    hide_smart_info: bool,
 }
 
 impl Default for UserSettings {
@@ -92,6 +107,7 @@ impl Default for UserSettings {
             dump_smart_data: false,
             dump_smart_threshold: false,
             ascii_view: false,
+            hide_smart_info: false,
         }
     }
 }
@@ -363,6 +379,7 @@ impl eframe::App for DiskInfoApp {
                         self.hide_serial,
                         self.green_mode,
                         self.raw_format,
+                        self.settings.hide_smart_info,
                     );
                     match clicked_setting {
                         Some(DriveViewAction::PreviousDrive) if !self.drives.is_empty() => {
@@ -593,6 +610,26 @@ impl DiskInfoApp {
                         self.selected = Some(drive.name.clone());
                         ui.close();
                     }
+                }
+                if !self.drives.is_empty() {
+                    ui.separator();
+                }
+                if ui
+                    .checkbox(
+                        &mut self.settings.hide_smart_info,
+                        "Hide S.M.A.R.T. Information",
+                    )
+                    .changed()
+                {
+                    save_settings(&self.settings);
+                    context.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(
+                        MAIN_WINDOW_WIDTH,
+                        if self.settings.hide_smart_info {
+                            MAIN_WINDOW_HIDDEN_SMART_HEIGHT
+                        } else {
+                            MAIN_WINDOW_HEIGHT
+                        },
+                    )));
                 }
             });
             ui.menu_button("Help", |ui| {
@@ -1250,6 +1287,7 @@ fn drive_view(
     hide_serial: bool,
     green_mode: bool,
     raw_format: RawFormat,
+    hide_smart_info: bool,
 ) -> Option<DriveViewAction> {
     let mut open_setting = None;
     ui.vertical(|ui| {
@@ -1338,23 +1376,25 @@ fn drive_view(
             },
         );
 
-        ui.separator();
-        if !drive.ata_attributes.is_empty() {
-            ui.label(RichText::new("S.M.A.R.T.").strong().size(12.0));
-            ata_attribute_table(ui, drive, settings, raw_format);
-        } else if !drive.nvme_metrics.is_empty() {
-            ui.label(RichText::new("NVMe S.M.A.R.T.").strong().size(12.0));
-            nvme_table(ui, drive);
-        } else {
-            ui.label(
-                RichText::new(
-                    drive
-                        .note
-                        .as_deref()
-                        .unwrap_or("S.M.A.R.T. data is unavailable for this drive."),
-                )
-                .weak(),
-            );
+        if !hide_smart_info {
+            ui.separator();
+            if !drive.ata_attributes.is_empty() {
+                ui.label(RichText::new("S.M.A.R.T.").strong().size(12.0));
+                ata_attribute_table(ui, drive, settings, raw_format);
+            } else if !drive.nvme_metrics.is_empty() {
+                ui.label(RichText::new("NVMe S.M.A.R.T.").strong().size(12.0));
+                nvme_table(ui, drive);
+            } else {
+                ui.label(
+                    RichText::new(
+                        drive
+                            .note
+                            .as_deref()
+                            .unwrap_or("S.M.A.R.T. data is unavailable for this drive."),
+                    )
+                    .weak(),
+                );
+            }
         }
     });
     open_setting
