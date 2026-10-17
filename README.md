@@ -1,6 +1,6 @@
-# CrystalDiskInfo for Linux
+# Viper Disk Info
 
-A native Linux and Rust port of CrystalDiskInfo. This project retains the supplied CrystalDiskInfo 9.9.3 source snapshot for reference while the Linux implementation is being ported into `src/`.
+A native Linux disk health application written in Rust with egui. It uses CrystalDiskInfo 9.9.3 as its behavior and interface reference; the original source remains in its separate reference directory.
 
 ## Current implementation
 
@@ -19,7 +19,7 @@ SMART access depends on `smartmontools` and permissions to access the relevant d
 Requirements: Rust (Cargo) and optionally `smartmontools`. The desktop UI uses eframe with Wayland and X11 support.
 
 ```sh
-cargo run --release
+cargo run --release --bin viperdiskinfo
 ```
 
 On Arch Linux, install smartmontools with the system package manager if SMART data is needed:
@@ -28,8 +28,23 @@ On Arch Linux, install smartmontools with the system package manager if SMART da
 sudo pacman -S smartmontools
 ```
 
+## Packaging
+
+Build an x86_64 AppImage (requires `magick`; the script downloads linuxdeploy on first use):
+
+```sh
+packaging/build-appimage.sh
+```
+
+Install or remove the system-wide binary, desktop entry, and icon:
+
+```sh
+packaging/packenger.sh install
+packaging/packenger.sh uninstall
+```
+
 ## Source and license
 
-The included upstream source snapshot is CrystalDiskInfo 9.9.3. The project is distributed under the MIT license; see [License/COPYRIGHT.txt](License/COPYRIGHT.txt) and the third-party notices in `License/`.
+The upstream behavior reference is CrystalDiskInfo 9.9.3. The upstream CrystalDiskInfo license notice is included in [LICENSE](LICENSE). Rust dependency licenses are documented by their respective crates.
 
 Upstream project: [Crystal Dew World](https://crystalmark.info/)

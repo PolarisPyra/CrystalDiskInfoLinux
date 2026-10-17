@@ -1,12 +1,12 @@
 [package]
-name = "crystaldiskinfo-linux"
+name = "viperdiskinfo"
 version = "0.1.0"
 edition = "2024"
-description = "Linux Rust port of CrystalDiskInfo"
+description = "Disk health and SMART information for Linux"
 license = "MIT"
 
 [[bin]]
-name = "crystaldiskinfo-linux"
+name = "viperdiskinfo"
 path = "src/main.rs"
 
 [dependencies]

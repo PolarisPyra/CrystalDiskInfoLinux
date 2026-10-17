@@ -143,11 +143,22 @@ fn settings_path() -> std::path::PathBuf {
             std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
         })
         .unwrap_or_else(|| std::path::PathBuf::from("."));
+    base.join("viperdiskinfo").join("settings.json")
+}
+
+fn legacy_settings_path() -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
     base.join("crystaldiskinfo-linux").join("settings.json")
 }
 
 fn load_settings() -> UserSettings {
     std::fs::read(settings_path())
+        .or_else(|_| std::fs::read(legacy_settings_path()))
         .ok()
         .and_then(|data| serde_json::from_slice(&data).ok())
         .unwrap_or_default()
@@ -556,7 +567,7 @@ impl DiskInfoApp {
                 }
             });
             ui.menu_button("Help", |ui| {
-                ui.label("CrystalDiskInfo Linux port");
+                ui.label("Viper Disk Info");
                 ui.label("SMART data is provided by smartmontools.");
             });
             if self.loading {
@@ -787,7 +798,7 @@ impl DiskInfoApp {
 
     fn report_text(&self) -> String {
         let mut report = String::from(
-            "----------------------------------------------------------------------------\nCrystalDiskInfo Linux\n----------------------------------------------------------------------------\n\n-- Disk List ---------------------------------------------------------------\n",
+            "----------------------------------------------------------------------------\nViper Disk Info\n----------------------------------------------------------------------------\n\n-- Disk List ---------------------------------------------------------------\n",
         );
         for (index, drive) in self.drives.iter().enumerate() {
             let _ = writeln!(
@@ -1003,7 +1014,7 @@ impl DiskInfoApp {
             .collapsible(false)
             .resizable(false)
             .show(context, |ui| {
-                ui.label("Save the current CrystalDiskInfo window as PNG or BMP.");
+                ui.label("Save the current Viper Disk Info window as PNG or BMP.");
                 let response = ui.text_edit_singleline(&mut self.save_image_path);
                 if response.changed() {
                     self.save_image_overwrite = false;

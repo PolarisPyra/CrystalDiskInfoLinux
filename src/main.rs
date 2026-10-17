@@ -6,12 +6,12 @@ fn main() -> eframe::Result {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([ui::MAIN_WINDOW_WIDTH, ui::MAIN_WINDOW_HEIGHT])
             .with_min_inner_size([860.0, 600.0])
-            .with_title("CrystalDiskInfo"),
+            .with_title("Viper Disk Info"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "org.crystalmark.CrystalDiskInfoLinux",
+        "com.viper.diskinfo",
         options,
         Box::new(|context| Ok(Box::new(ui::DiskInfoApp::new(context)))),
     )

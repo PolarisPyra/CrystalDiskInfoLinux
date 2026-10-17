@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Viper Disk Info
+GenericName=Disk Health Monitor
+Comment=View disk health, temperature, and SMART information
+Exec=viperdiskinfo
+TryExec=viperdiskinfo
+Icon=viperdiskinfo
+Terminal=false
+StartupNotify=true
+Categories=System;HardwareSettings;
+Keywords=viper;disk;drive;smart;health;storage;
+StartupWMClass=viperdiskinfo
