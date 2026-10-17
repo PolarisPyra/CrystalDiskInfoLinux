@@ -252,9 +252,16 @@ impl eframe::App for DiskInfoApp {
             )
             .show(ui, |ui| {
                 if let Some(drive) = self.current_drive() {
+                    let settings = self
+                        .settings
+                        .drives
+                        .get(&drive.name)
+                        .cloned()
+                        .unwrap_or_else(|| DriveSettings::defaults(drive));
                     drive_view(
                         ui,
                         drive,
+                        &settings,
                         self.fahrenheit,
                         self.hide_serial,
                         self.green_mode,
@@ -659,13 +666,14 @@ impl DiskInfoApp {
 fn drive_view(
     ui: &mut egui::Ui,
     drive: &Drive,
+    settings: &DriveSettings,
     fahrenheit: bool,
     hide_serial: bool,
     green_mode: bool,
     raw_format: RawFormat,
 ) {
     ui.vertical(|ui| {
-        let (status, color) = status_label(drive, green_mode);
+        let (status, color) = status_label_with_settings(drive, settings, green_mode);
         let model_capacity = format!(
             "{} : {}",
             drive.model,
@@ -700,8 +708,22 @@ fn drive_view(
                                     .unwrap_or_else(|| {
                                         if fahrenheit { "-- °F" } else { "-- °C" }.into()
                                     });
+                                let temperature_color = drive
+                                    .temperature_c
+                                    .map(|temperature| {
+                                        if temperature > i64::from(settings.temperature_alarm) {
+                                            Color32::from_rgb(234, 77, 77)
+                                        } else if temperature
+                                            == i64::from(settings.temperature_alarm)
+                                        {
+                                            Color32::from_rgb(224, 170, 55)
+                                        } else {
+                                            color
+                                        }
+                                    })
+                                    .unwrap_or(color);
                                 ui.colored_label(
-                                    color,
+                                    temperature_color,
                                     RichText::new(temperature).size(18.0).strong(),
                                 );
                             });
@@ -728,7 +750,7 @@ fn drive_view(
         ui.separator();
         if !drive.ata_attributes.is_empty() {
             ui.label(RichText::new("S.M.A.R.T.").strong().size(12.0));
-            ata_attribute_table(ui, drive, raw_format);
+            ata_attribute_table(ui, drive, settings, raw_format);
         } else if !drive.nvme_metrics.is_empty() {
             ui.label(RichText::new("NVMe S.M.A.R.T.").strong().size(12.0));
             nvme_table(ui, drive);
@@ -819,7 +841,12 @@ fn metadata(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.end_row();
 }
 
-fn ata_attribute_table(ui: &mut egui::Ui, drive: &Drive, raw_format: RawFormat) {
+fn ata_attribute_table(
+    ui: &mut egui::Ui,
+    drive: &Drive,
+    settings: &DriveSettings,
+    raw_format: RawFormat,
+) {
     let headers = [
         "",
         "ID",
@@ -843,10 +870,22 @@ fn ata_attribute_table(ui: &mut egui::Ui, drive: &Drive, raw_format: RawFormat) 
                     }
                     ui.end_row();
                     for attribute in &drive.ata_attributes {
+                        let threshold = match attribute.id {
+                            0x05 => settings.threshold_05,
+                            0xC5 => settings.threshold_c5,
+                            0xC6 => settings.threshold_c6,
+                            _ => 0,
+                        };
+                        let caution = threshold > 0
+                            && attribute
+                                .raw_value
+                                .is_some_and(|raw| raw >= threshold as u64);
                         let failed = attribute.failed
                             || (attribute.threshold > 0 && attribute.current < attribute.threshold);
                         let (label, color) = if failed {
                             ("BAD", Color32::from_rgb(234, 77, 77))
+                        } else if caution {
+                            ("CAUTION", Color32::from_rgb(224, 170, 55))
                         } else {
                             ("GOOD", Color32::from_rgb(63, 184, 107))
                         };
@@ -928,12 +967,58 @@ fn nvme_table(ui: &mut egui::Ui, drive: &Drive) {
         });
 }
 
-fn status_label(drive: &Drive, green_mode: bool) -> (&str, Color32) {
+fn status_label(drive: &Drive, green_mode: bool) -> (&'static str, Color32) {
     match drive.smart_status {
         Some(false) => ("Caution", Color32::from_rgb(235, 87, 87)),
         Some(true) if green_mode => ("Good", Color32::from_rgb(87, 205, 95)),
         Some(true) => ("Good", Color32::from_rgb(55, 181, 118)),
         None => ("Unknown", Color32::from_rgb(145, 150, 160)),
+    }
+}
+
+fn status_label_with_settings(
+    drive: &Drive,
+    settings: &DriveSettings,
+    green_mode: bool,
+) -> (&'static str, Color32) {
+    let mut caution = false;
+    let ssd = drive
+        .rotation_rate
+        .as_deref()
+        .is_some_and(|rate| rate == "SSD" || rate == "0");
+    for attribute in &drive.ata_attributes {
+        let threshold = if ssd && attribute.id == 0x05 {
+            settings.threshold_ff
+        } else {
+            match attribute.id {
+                0x05 => settings.threshold_05,
+                0xC5 => settings.threshold_c5,
+                0xC6 => settings.threshold_c6,
+                _ => 0,
+            }
+        };
+        if threshold > 0
+            && attribute.raw_value.is_some_and(|raw| {
+                if ssd && attribute.id == 0x05 {
+                    100u64.saturating_sub(raw.min(100)) <= threshold as u64
+                } else {
+                    raw >= threshold as u64
+                }
+            })
+        {
+            caution = true;
+        }
+    }
+    if let Some(temperature) = drive.temperature_c
+        && temperature >= i64::from(settings.temperature_alarm)
+    {
+        caution = true;
+    }
+    let (base_status, base_color) = status_label(drive, green_mode);
+    if base_status == "Good" && caution {
+        ("Caution", Color32::from_rgb(224, 170, 55))
+    } else {
+        (base_status, base_color)
     }
 }
 
