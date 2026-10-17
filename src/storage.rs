@@ -107,6 +107,9 @@ struct NvmeHealth {
     unsafe_shutdowns: Option<u64>,
     media_errors: Option<u64>,
     num_err_log_entries: Option<u64>,
+    warning_temp_time: Option<u64>,
+    critical_comp_time: Option<u64>,
+    temperature_sensors: Option<Vec<Option<i64>>>,
 }
 #[derive(Deserialize)]
 struct AtaAttributes {
@@ -372,6 +375,41 @@ fn merge_smart(drive: &mut Drive, result: SmartctlEnvelope) {
                     value,
                 })
             }));
+        for (id, name, value) in [
+            (
+                0x10,
+                "Warning composite temperature time",
+                nvme.warning_temp_time,
+            ),
+            (
+                0x11,
+                "Critical composite temperature time",
+                nvme.critical_comp_time,
+            ),
+        ] {
+            if let Some(value) = value {
+                drive.nvme_metrics.push(Metric {
+                    id,
+                    name: name.into(),
+                    value: format!("{value} minutes"),
+                });
+            }
+        }
+        if let Some(sensors) = nvme.temperature_sensors {
+            drive
+                .nvme_metrics
+                .extend(sensors.into_iter().take(8).enumerate().filter_map(
+                    |(index, temperature)| {
+                        temperature
+                            .filter(|temperature| *temperature != 0)
+                            .map(|temperature| Metric {
+                                id: 0x12 + index as u8,
+                                name: format!("Temperature sensor {}", index + 1),
+                                value: format!("{temperature} °C"),
+                            })
+                    },
+                ));
+        }
     }
     if let Some(attributes) = data.ata_smart_attributes.and_then(|v| v.table) {
         for attribute in attributes {
