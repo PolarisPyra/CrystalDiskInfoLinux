@@ -39,6 +39,9 @@ pub struct DiskInfoApp {
     settings_drive: String,
     temperature_draft: i32,
     health_draft: HealthThresholds,
+    save_text_dialog: bool,
+    save_text_path: String,
+    save_text_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -164,6 +167,9 @@ impl DiskInfoApp {
             settings_drive: String::new(),
             temperature_draft: 50,
             health_draft: HealthThresholds::default(),
+            save_text_dialog: false,
+            save_text_path: String::new(),
+            save_text_error: None,
         };
         app.hide_serial = app.settings.hide_serial;
         app.fahrenheit = app.settings.fahrenheit;
@@ -256,6 +262,11 @@ impl eframe::App for DiskInfoApp {
         if context.input(|input| input.key_pressed(egui::Key::F6)) {
             self.start_scan(context.clone());
         }
+        if context.input(|input| {
+            input.key_pressed(egui::Key::C) && input.modifiers.ctrl && input.modifiers.shift
+        }) {
+            context.copy_text(self.report_text());
+        }
         context.set_visuals(if self.dark_theme {
             egui::Visuals::dark()
         } else {
@@ -333,6 +344,7 @@ impl eframe::App for DiskInfoApp {
             }
         }
         self.settings_windows(&context);
+        self.save_text_window(&context);
     }
 }
 
@@ -340,8 +352,10 @@ impl DiskInfoApp {
     fn menu_bar(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
-                if ui.button("Copy report to clipboard").clicked() {
-                    context.copy_text(self.report_text());
+                if ui.button("Save text...").clicked() {
+                    self.save_text_path.clear();
+                    self.save_text_error = None;
+                    self.save_text_dialog = true;
                     ui.close();
                 }
                 ui.separator();
@@ -351,7 +365,7 @@ impl DiskInfoApp {
                 }
             });
             ui.menu_button("Edit", |ui| {
-                if ui.button("Copy drive information").clicked() {
+                if ui.button("Copy\tCtrl + Shift + C").clicked() {
                     context.copy_text(self.report_text());
                     ui.close();
                 }
@@ -703,14 +717,66 @@ impl DiskInfoApp {
     }
 
     fn report_text(&self) -> String {
-        let mut report = String::from("CrystalDiskInfo\n");
-        if let Some(drive) = self.current_drive() {
-            let _ = writeln!(report, "Device: /dev/{}", drive.name);
-            let _ = writeln!(report, "Model: {}", drive.model);
-            if !self.hide_serial {
-                let _ = writeln!(report, "Serial number: {}", drive.serial);
-            }
-            let _ = writeln!(report, "Health: {}", drive.assessment);
+        let mut report = String::from(
+            "----------------------------------------------------------------------------\nCrystalDiskInfo Linux\n----------------------------------------------------------------------------\n\n-- Disk List ---------------------------------------------------------------\n",
+        );
+        for (index, drive) in self.drives.iter().enumerate() {
+            let _ = writeln!(
+                report,
+                " ({:02}) {} : {} [/dev/{}]",
+                index + 1,
+                drive.model,
+                storage::format_capacity(drive.capacity),
+                drive.name
+            );
+        }
+        for (index, drive) in self.drives.iter().enumerate() {
+            let _ = writeln!(
+                report,
+                "\n----------------------------------------------------------------------------\n ({:02}) {}\n----------------------------------------------------------------------------",
+                index + 1,
+                drive.model
+            );
+            let _ = writeln!(report, "           Model : {}", drive.model);
+            let _ = writeln!(report, "          Device : /dev/{}", drive.name);
+            let _ = writeln!(report, "       Firmware : {}", option(&drive.firmware));
+            let _ = writeln!(
+                report,
+                "   Serial Number : {}",
+                if self.hide_serial {
+                    "********"
+                } else {
+                    available(&drive.serial)
+                }
+            );
+            let _ = writeln!(
+                report,
+                "       Disk Size : {}",
+                storage::format_capacity(drive.capacity)
+            );
+            let _ = writeln!(report, "       Interface : {}", option(&drive.interface));
+            let _ = writeln!(report, "        Standard : {}", drive.kind);
+            let _ = writeln!(
+                report,
+                "   Transfer Mode : {}",
+                option(&drive.transfer_mode)
+            );
+            let _ = writeln!(
+                report,
+                "  Power On Hours : {}",
+                drive
+                    .power_on_hours
+                    .map(|v| format!("{v} hours"))
+                    .unwrap_or_else(|| "Unknown".into())
+            );
+            let _ = writeln!(
+                report,
+                "   Power On Count : {}",
+                drive
+                    .power_cycles
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "Unknown".into())
+            );
             let _ = writeln!(
                 report,
                 "Temperature: {}",
@@ -719,20 +785,73 @@ impl DiskInfoApp {
                     .map(|value| show_temperature(value, self.fahrenheit))
                     .unwrap_or_else(|| "Unavailable".into())
             );
-            let _ = writeln!(
-                report,
-                "Capacity: {}",
-                storage::format_capacity(drive.capacity)
-            );
+            let _ = writeln!(report, "   Health Status : {}", drive.assessment);
+            let _ = writeln!(report, "    Drive Letter : {}", drive.drive_map.join(", "));
+            if !drive.ata_attributes.is_empty() {
+                report.push_str("\n-- S.M.A.R.T. --------------------------------------------------------------\n");
+            }
             for attribute in &drive.ata_attributes {
                 let _ = writeln!(
                     report,
-                    "{} {}: {}",
-                    attribute.id, attribute.name, attribute.raw
+                    " {:02X} {} | Current: {} | Worst: {} | Threshold: {} | Raw: {}",
+                    attribute.id,
+                    attribute.name,
+                    attribute.current,
+                    attribute.worst,
+                    attribute.threshold,
+                    attribute.raw,
                 );
+            }
+            if !drive.nvme_metrics.is_empty() {
+                report.push_str("\n-- NVMe S.M.A.R.T. ---------------------------------------------------------\n");
+                for metric in &drive.nvme_metrics {
+                    let _ = writeln!(report, " {} : {}", metric.name, metric.value);
+                }
             }
         }
         report
+    }
+
+    fn save_text_window(&mut self, context: &egui::Context) {
+        if !self.save_text_dialog {
+            return;
+        }
+        let mut open = self.save_text_dialog;
+        egui::Window::new("Save text report")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(context, |ui| {
+                ui.label("Save the full report for all detected drives.");
+                ui.horizontal(|ui| {
+                    ui.label("File path");
+                    ui.text_edit_singleline(&mut self.save_text_path);
+                });
+                if let Some(error) = &self.save_text_error {
+                    ui.colored_label(Color32::LIGHT_RED, error);
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        let result = if self.save_text_path.trim().is_empty() {
+                            Err("Enter a file path.".to_string())
+                        } else {
+                            std::fs::write(&self.save_text_path, self.report_text())
+                                .map_err(|error| format!("Could not save report: {error}"))
+                        };
+                        match result {
+                            Ok(()) => {
+                                self.save_text_error = None;
+                                self.save_text_dialog = false;
+                            }
+                            Err(error) => self.save_text_error = Some(error),
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.save_text_dialog = false;
+                    }
+                });
+            });
+        self.save_text_dialog = open && self.save_text_dialog;
     }
 }
 
