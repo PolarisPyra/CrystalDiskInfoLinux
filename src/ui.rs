@@ -2265,25 +2265,44 @@ fn nvme_table(
     green_mode: bool,
     raw_format: RawFormat,
 ) {
-    Grid::new("nvme_smart_table")
-        .num_columns(4)
-        .spacing(Vec2::new(10.0, 3.0))
-        .striped(true)
+    let headers = [
+        "",
+        "ID",
+        "Attribute Name",
+        "Current",
+        "Worst",
+        "Threshold",
+        "Raw Values",
+    ];
+    ScrollArea::vertical()
+        .auto_shrink([false, true])
+        .max_height(ui.available_height())
         .show(ui, |ui| {
-            for heading in ["", "ID", "Attribute Name", "Raw Values"] {
-                ui.label(RichText::new(heading).weak().size(11.0));
-            }
-            ui.end_row();
-            for metric in &drive.nvme_metrics {
-                let (label, color) = nvme_metric_status(drive, metric, settings, green_mode);
-                ui.colored_label(color, label);
-                ui.label(format!("{:02X}", metric.id));
-                ui.label(&metric.name);
-                ui.label(
-                    format_nvme_raw(metric, raw_format).unwrap_or_else(|| metric.value.clone()),
-                );
-                ui.end_row();
-            }
+            Grid::new("nvme_smart_table")
+                .num_columns(headers.len())
+                .spacing(Vec2::new(10.0, 3.0))
+                .striped(true)
+                .show(ui, |ui| {
+                    for heading in headers {
+                        ui.label(RichText::new(heading).weak().size(11.0));
+                    }
+                    ui.end_row();
+                    for metric in &drive.nvme_metrics {
+                        let (label, color) =
+                            nvme_metric_status(drive, metric, settings, green_mode);
+                        ui.colored_label(color, label);
+                        ui.label(format!("{:02X}", metric.id));
+                        ui.label(&metric.name);
+                        ui.label("0");
+                        ui.label("0");
+                        ui.label("0");
+                        ui.label(
+                            format_nvme_raw(metric, raw_format)
+                                .unwrap_or_else(|| metric.value.clone()),
+                        );
+                        ui.end_row();
+                    }
+                });
         });
 }
 
@@ -2306,7 +2325,7 @@ fn format_nvme_raw(metric: &storage::Metric, format: RawFormat) -> Option<String
     let bytes = value.to_le_bytes();
     Some(match format {
         RawFormat::Hex => format!(
-            "00{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+            "{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
             bytes[5], bytes[4], bytes[3], bytes[2], bytes[1], bytes[0]
         ),
         RawFormat::Decimal => value.to_string(),
