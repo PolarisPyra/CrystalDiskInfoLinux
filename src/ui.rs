@@ -48,6 +48,7 @@ pub struct DiskInfoApp {
     scan_receiver: Option<mpsc::Receiver<Vec<Drive>>>,
     loading: bool,
     scan_error: Option<String>,
+    logo_texture: egui::TextureHandle,
     fahrenheit: bool,
     hide_serial: bool,
     dark_theme: bool,
@@ -61,6 +62,7 @@ pub struct DiskInfoApp {
     graph_open: bool,
     temperature_history: HashMap<String, Vec<(f64, f32)>>,
     settings: UserSettings,
+    about_dialog: bool,
     temperature_dialog: bool,
     health_dialog: bool,
     sound_dialog: bool,
@@ -148,6 +150,27 @@ impl Default for UserSettings {
 
 fn default_dark_theme() -> bool {
     true
+}
+
+fn load_logo(context: &egui::Context) -> egui::TextureHandle {
+    let bytes = include_bytes!("../assets/logo.png");
+    let image = (|| {
+        let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+            .read_info()
+            .ok()?;
+        let mut buffer = vec![0; reader.output_buffer_size()?];
+        let info = reader.next_frame(&mut buffer).ok()?;
+        (info.color_type == png::ColorType::Rgba && info.bit_depth == png::BitDepth::Eight).then(
+            || {
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [info.width as usize, info.height as usize],
+                    &buffer[..info.buffer_size()],
+                )
+            },
+        )
+    })()
+    .unwrap_or_else(|| egui::ColorImage::filled([1, 1], Color32::TRANSPARENT));
+    context.load_texture("application_logo", image, egui::TextureOptions::LINEAR)
 }
 
 fn default_hide_no_smart_disk() -> bool {
@@ -391,12 +414,14 @@ impl DiskInfoApp {
         let settings = load_settings();
         let raw_format = raw_format_from_setting(settings.raw_values);
         let auto_refresh_seconds = auto_refresh_interval(settings.auto_refresh_minutes);
+        let logo_texture = load_logo(&context.egui_ctx);
         let mut app = Self {
             drives: Vec::new(),
             selected: None,
             scan_receiver: None,
             loading: false,
             scan_error: None,
+            logo_texture,
             fahrenheit: false,
             hide_serial: false,
             dark_theme: true,
@@ -410,6 +435,7 @@ impl DiskInfoApp {
             graph_open: false,
             temperature_history: HashMap::new(),
             settings,
+            about_dialog: false,
             temperature_dialog: false,
             health_dialog: false,
             sound_dialog: false,
@@ -797,6 +823,7 @@ impl eframe::App for DiskInfoApp {
         }
         self.settings_windows(&context);
         self.sound_settings_window(&context);
+        self.about_window(&context);
         self.save_text_window(&context);
         self.save_image_window(&context);
 
@@ -1071,8 +1098,16 @@ impl DiskInfoApp {
                 }
             });
             ui.menu_button("Help", |ui| {
-                ui.label("Viper Disk Info");
-                ui.label("SMART data is provided by smartmontools.");
+                ui.hyperlink_to("Help [Web]", "https://crystalmark.info/");
+                ui.hyperlink_to(
+                    "About S.M.A.R.T. (Wikipedia) [Web]",
+                    "https://en.wikipedia.org/wiki/Self-Monitoring,_Analysis_and_Reporting_Technology",
+                );
+                ui.separator();
+                if ui.button("About Viper Disk Info").clicked() {
+                    self.about_dialog = true;
+                    ui.close();
+                }
             });
             if self.loading {
                 ui.spinner();
@@ -1321,6 +1356,47 @@ impl DiskInfoApp {
                 });
             });
         self.sound_dialog = open;
+    }
+
+    fn about_window(&mut self, context: &egui::Context) {
+        if !self.about_dialog {
+            return;
+        }
+        let mut open = self.about_dialog;
+        let mut close_clicked = false;
+        egui::Window::new("About Viper Disk Info")
+            .open(&mut open)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .default_width(390.0)
+            .collapsible(false)
+            .resizable(false)
+            .show(context, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.image((self.logo_texture.id(), Vec2::splat(112.0)));
+                    ui.heading("Viper Disk Info");
+                    ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                    ui.label("Disk health and S.M.A.R.T. information for Linux");
+                });
+                ui.separator();
+                ui.label("Interface and behavior reference");
+                ui.hyperlink_to("CrystalDiskInfo 9.9.3", "https://crystalmark.info/");
+                ui.add_space(6.0);
+                ui.label("S.M.A.R.T. data provider");
+                ui.hyperlink_to("smartmontools", "https://www.smartmontools.org/");
+                ui.add_space(6.0);
+                ui.label("License: MIT");
+                ui.label("CrystalDiskInfo copyright: hiyohiyo and CrystalMark Inc.");
+                ui.separator();
+                ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Close").clicked() {
+                        close_clicked = true;
+                    }
+                });
+            });
+        if close_clicked {
+            open = false;
+        }
+        self.about_dialog = open;
     }
 
     fn drive_tabs(&mut self, ui: &mut egui::Ui) {
