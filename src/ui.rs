@@ -4,6 +4,7 @@ use eframe::egui::{
     StrokeKind, Vec2,
 };
 use serde::{Deserialize, Serialize};
+use std::io::Write as IoWrite;
 use std::{
     collections::HashMap, fmt::Write as _, process::Command, sync::mpsc, thread, time::Duration,
 };
@@ -108,6 +109,8 @@ struct UserSettings {
     raw_values: u8,
     #[serde(default)]
     auto_detection_seconds: u32,
+    #[serde(default)]
+    event_log: bool,
 }
 
 impl Default for UserSettings {
@@ -128,6 +131,7 @@ impl Default for UserSettings {
             auto_refresh_minutes: default_auto_refresh_minutes(),
             raw_values: 0,
             auto_detection_seconds: 0,
+            event_log: false,
         }
     }
 }
@@ -146,6 +150,47 @@ fn default_hide_raid_volume() -> bool {
 
 fn default_alarm_health_status() -> bool {
     true
+}
+
+fn event_log_path() -> std::path::PathBuf {
+    let state_dir = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/state"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    state_dir.join("viperdiskinfo/events.jsonl")
+}
+
+fn append_event_log(drive: &Drive, messages: &[String], urgency: &str) {
+    let path = event_log_path();
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let record = serde_json::json!({
+        "timestamp_unix": timestamp,
+        "device": drive.name,
+        "model": drive.model,
+        "urgency": urgency,
+        "events": messages,
+    });
+    if let Ok(line) = serde_json::to_string(&record) {
+        let _ = writeln!(file, "{line}");
+    }
 }
 
 fn default_auto_refresh_minutes() -> u32 {
@@ -493,6 +538,9 @@ impl DiskInfoApp {
             if !messages.is_empty() {
                 let title = format!("{} health alert", drive.model);
                 let body = messages.join("\n");
+                if self.settings.event_log {
+                    append_event_log(drive, &messages, urgency);
+                }
                 if let Ok(mut child) = Command::new("notify-send")
                     .arg("--app-name=Viper Disk Info")
                     .arg(format!("--urgency={urgency}"))
@@ -788,6 +836,14 @@ impl DiskInfoApp {
                             save_settings(&self.settings);
                             ui.close();
                         }
+                    }
+                });
+                ui.menu_button("Alert Features", |ui| {
+                    if ui
+                        .checkbox(&mut self.settings.event_log, "Event Log")
+                        .changed()
+                    {
+                        save_settings(&self.settings);
                     }
                 });
                 ui.separator();
