@@ -52,6 +52,8 @@ pub struct DiskInfoApp {
     raw_format: RawFormat,
     auto_refresh_seconds: Option<f64>,
     last_scan_time: f64,
+    last_detection_time: f64,
+    device_signature: storage::DeviceSignature,
     graph_open: bool,
     temperature_history: HashMap<String, Vec<(f64, f32)>>,
     settings: UserSettings,
@@ -99,6 +101,8 @@ struct UserSettings {
     auto_refresh_minutes: u32,
     #[serde(default)]
     raw_values: u8,
+    #[serde(default)]
+    auto_detection_seconds: u32,
 }
 
 impl Default for UserSettings {
@@ -117,6 +121,7 @@ impl Default for UserSettings {
             hide_no_smart_disk: true,
             auto_refresh_minutes: default_auto_refresh_minutes(),
             raw_values: 0,
+            auto_detection_seconds: 0,
         }
     }
 }
@@ -154,6 +159,13 @@ fn raw_format_setting(format: RawFormat) -> u8 {
 fn auto_refresh_interval(minutes: u32) -> Option<f64> {
     match minutes {
         1 | 3 | 5 | 10 | 30 | 60 | 120 | 180 | 360 | 720 | 1440 => Some(f64::from(minutes) * 60.0),
+        _ => None,
+    }
+}
+
+fn auto_detection_interval(seconds: u32) -> Option<f64> {
+    match seconds {
+        5 | 10 | 20 | 30 => Some(f64::from(seconds)),
         _ => None,
     }
 }
@@ -258,6 +270,8 @@ impl DiskInfoApp {
             raw_format,
             auto_refresh_seconds,
             last_scan_time: 0.0,
+            last_detection_time: 0.0,
+            device_signature: Vec::new(),
             graph_open: false,
             temperature_history: HashMap::new(),
             settings,
@@ -319,6 +333,7 @@ impl DiskInfoApp {
                     }
                 }
                 self.drives = drives;
+                self.device_signature = storage::device_signature();
                 let visible = self.visible_drives();
                 if self
                     .selected
@@ -388,6 +403,15 @@ impl eframe::App for DiskInfoApp {
             && context.input(|input| input.time) - self.last_scan_time >= interval
         {
             self.start_scan(context.clone());
+        }
+        let now = context.input(|input| input.time);
+        if let Some(interval) = auto_detection_interval(self.settings.auto_detection_seconds)
+            && now - self.last_detection_time >= interval
+        {
+            self.last_detection_time = now;
+            if !self.loading && storage::device_signature() != self.device_signature {
+                self.start_scan(context.clone());
+            }
         }
         if context.input(|input| input.key_pressed(egui::Key::F5)) {
             self.start_scan(context.clone());
@@ -509,6 +533,20 @@ impl eframe::App for DiskInfoApp {
         self.settings_windows(&context);
         self.save_text_window(&context);
         self.save_image_window(&context);
+
+        let refresh_wait = self
+            .auto_refresh_seconds
+            .filter(|_| !self.loading)
+            .map(|interval| interval - (now - self.last_scan_time));
+        let detection_wait = auto_detection_interval(self.settings.auto_detection_seconds)
+            .map(|interval| interval - (now - self.last_detection_time));
+        if let Some(wait) = [refresh_wait, detection_wait]
+            .into_iter()
+            .flatten()
+            .min_by(f64::total_cmp)
+        {
+            context.request_repaint_after(Duration::from_secs_f64(wait.max(0.05)));
+        }
     }
 }
 
@@ -593,6 +631,23 @@ impl DiskInfoApp {
                         let selected = self.auto_refresh_seconds == interval;
                         if ui.selectable_label(selected, label).clicked() {
                             self.set_interval(interval);
+                            ui.close();
+                        }
+                    }
+                });
+                ui.menu_button("Auto Detection", |ui| {
+                    for (label, seconds) in [
+                        ("Disable", 0),
+                        ("5 sec.", 5),
+                        ("10 sec.", 10),
+                        ("20 sec.", 20),
+                        ("30 sec.", 30),
+                    ] {
+                        let selected = self.settings.auto_detection_seconds == seconds;
+                        if ui.selectable_label(selected, label).clicked() {
+                            self.settings.auto_detection_seconds = seconds;
+                            self.last_detection_time = context.input(|input| input.time);
+                            save_settings(&self.settings);
                             ui.close();
                         }
                     }

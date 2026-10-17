@@ -28,6 +28,8 @@ pub struct Drive {
     pub ata_attributes: Vec<AtaSmartAttribute>,
 }
 
+pub type DeviceSignature = Vec<(String, String, u64)>;
+
 #[derive(Clone, Debug)]
 pub struct Metric {
     pub name: String,
@@ -173,6 +175,29 @@ pub fn discover() -> Vec<Drive> {
         .collect::<Vec<_>>();
     drives.sort_by(|a, b| a.name.cmp(&b.name));
     drives
+}
+
+pub fn device_signature() -> DeviceSignature {
+    let Ok(entries) = fs::read_dir("/sys/block") else {
+        return Vec::new();
+    };
+    let mut signature = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("loop") || name.starts_with("ram") || name.starts_with("zram") {
+                return None;
+            }
+            let root = entry.path();
+            let capacity = read_u64(root.join("size")).unwrap_or(0).saturating_mul(512);
+            let model = read_trimmed(root.join("device/model"))
+                .or_else(|| read_trimmed(root.join("device/name")))
+                .unwrap_or_default();
+            Some((name, model, capacity))
+        })
+        .collect::<DeviceSignature>();
+    signature.sort_by(|left, right| left.0.cmp(&right.0));
+    signature
 }
 
 #[derive(Deserialize)]
