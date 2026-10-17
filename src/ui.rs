@@ -3,7 +3,7 @@ use gtk::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, Grid, Label, ListBox, ListBoxRow,
     Orientation, ScrolledWindow, SelectionMode, glib, prelude::*,
 };
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, rc::Rc, sync::mpsc, thread, time::Duration};
 
 pub fn build(app: &Application) {
     let window = ApplicationWindow::builder()
@@ -92,6 +92,7 @@ pub fn build(app: &Application) {
     let ata_for_refresh = ata_attributes.clone();
     let nvme_title_for_refresh = nvme_title.clone();
     let ata_title_for_refresh = ata_title.clone();
+    let refresh_for_callback = refresh.clone();
     refresh.connect_clicked(move |_| {
         refresh_drives(
             &list_for_refresh,
@@ -103,6 +104,7 @@ pub fn build(app: &Application) {
             &ata_for_refresh,
             &nvme_title_for_refresh,
             &ata_title_for_refresh,
+            &refresh_for_callback,
         )
     });
     if let Some(header_bar) = root.first_child().and_then(|w| w.downcast::<GtkBox>().ok()) {
@@ -148,6 +150,7 @@ pub fn build(app: &Application) {
         &ata_attributes,
         &nvme_title,
         &ata_title,
+        &refresh,
     );
     window.present();
 }
@@ -190,11 +193,71 @@ fn refresh_drives(
     ata_attributes: &Grid,
     nvme_title: &Label,
     ata_title: &Label,
+    refresh_button: &Button,
+) {
+    refresh_button.set_sensitive(false);
+    health.set_text("Scanning drives...");
+    note.set_text("Reading device metadata and SMART data.");
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = sender.send(storage::discover());
+    });
+
+    let list = list.clone();
+    let drives = drives.clone();
+    let health = health.clone();
+    let note = note.clone();
+    let details = details.clone();
+    let nvme_metrics = nvme_metrics.clone();
+    let ata_attributes = ata_attributes.clone();
+    let nvme_title = nvme_title.clone();
+    let ata_title = ata_title.clone();
+    let refresh_button = refresh_button.clone();
+    glib::timeout_add_local(Duration::from_millis(50), move || {
+        match receiver.try_recv() {
+            Ok(found) => {
+                populate_drives(
+                    &list,
+                    &drives,
+                    &health,
+                    &note,
+                    &details,
+                    &nvme_metrics,
+                    &ata_attributes,
+                    &nvme_title,
+                    &ata_title,
+                    found,
+                );
+                refresh_button.set_sensitive(true);
+                glib::ControlFlow::Break
+            }
+            Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                health.set_text("Drive scan failed");
+                note.set_text("The background device scan ended unexpectedly.");
+                refresh_button.set_sensitive(true);
+                glib::ControlFlow::Break
+            }
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn populate_drives(
+    list: &ListBox,
+    drives: &Rc<RefCell<Vec<Drive>>>,
+    health: &Label,
+    note: &Label,
+    details: &GtkBox,
+    nvme_metrics: &Grid,
+    ata_attributes: &Grid,
+    nvme_title: &Label,
+    ata_title: &Label,
+    found: Vec<Drive>,
 ) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
-    let found = storage::discover();
     *drives.borrow_mut() = found;
     let borrowed = drives.borrow();
     for drive in borrowed.iter() {
