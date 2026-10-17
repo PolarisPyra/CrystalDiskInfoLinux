@@ -2161,7 +2161,20 @@ fn metadata_column_secondary(ui: &mut egui::Ui, drive: &Drive) {
             } else {
                 metadata(ui, "NV Cache Size", "Unavailable");
             }
-            metadata(ui, "Rotation Rate", option(&drive.rotation_rate));
+            let rotation_rate = drive
+                .rotation_rate
+                .as_deref()
+                .map(|rate| {
+                    if rate.eq_ignore_ascii_case("SSD")
+                        || rate.eq_ignore_ascii_case("solid state device")
+                    {
+                        "---- (SSD)"
+                    } else {
+                        rate
+                    }
+                })
+                .unwrap_or("Unavailable");
+            metadata(ui, "Rotation Rate", rotation_rate);
             metadata(
                 ui,
                 "Power On Count",
@@ -2170,15 +2183,28 @@ fn metadata_column_secondary(ui: &mut egui::Ui, drive: &Drive) {
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "Unavailable".into()),
             );
-            metadata(
-                ui,
-                "Power On Hours",
-                &drive
-                    .power_on_hours
-                    .map(|value| format!("{value} hours"))
-                    .unwrap_or_else(|| "Unavailable".into()),
-            );
+            if let Some(hours) = drive.power_on_hours {
+                metadata_with_tooltip(
+                    ui,
+                    "Power On Hours",
+                    &format!("{hours} hours"),
+                    Some(power_on_duration_tooltip(hours)),
+                );
+            } else {
+                metadata(ui, "Power On Hours", "Unavailable");
+            }
         });
+}
+
+fn power_on_duration_tooltip(total_hours: u64) -> String {
+    let years = total_hours / (365 * 24);
+    let days = (total_hours - years * 365 * 24) / 24;
+    let hours = total_hours % 24;
+    if years > 0 {
+        format!("{years} years {days} days {hours} hours")
+    } else {
+        format!("{days} days {hours} hours")
+    }
 }
 
 fn metadata(ui: &mut egui::Ui, label: &str, value: &str) {
