@@ -95,6 +95,10 @@ struct UserSettings {
     hide_smart_info: bool,
     #[serde(default = "default_hide_no_smart_disk")]
     hide_no_smart_disk: bool,
+    #[serde(default = "default_auto_refresh_minutes")]
+    auto_refresh_minutes: u32,
+    #[serde(default)]
+    raw_values: u8,
 }
 
 impl Default for UserSettings {
@@ -111,6 +115,8 @@ impl Default for UserSettings {
             ascii_view: false,
             hide_smart_info: false,
             hide_no_smart_disk: true,
+            auto_refresh_minutes: default_auto_refresh_minutes(),
+            raw_values: 0,
         }
     }
 }
@@ -121,6 +127,35 @@ fn default_dark_theme() -> bool {
 
 fn default_hide_no_smart_disk() -> bool {
     true
+}
+
+fn default_auto_refresh_minutes() -> u32 {
+    10
+}
+
+fn raw_format_from_setting(value: u8) -> RawFormat {
+    match value {
+        1 => RawFormat::Decimal,
+        2 => RawFormat::TwoByte,
+        3 => RawFormat::OneByte,
+        _ => RawFormat::Hex,
+    }
+}
+
+fn raw_format_setting(format: RawFormat) -> u8 {
+    match format {
+        RawFormat::Hex => 0,
+        RawFormat::Decimal => 1,
+        RawFormat::TwoByte => 2,
+        RawFormat::OneByte => 3,
+    }
+}
+
+fn auto_refresh_interval(minutes: u32) -> Option<f64> {
+    match minutes {
+        1 | 3 | 5 | 10 | 30 | 60 | 120 | 180 | 360 | 720 | 1440 => Some(f64::from(minutes) * 60.0),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -207,6 +242,9 @@ fn save_settings(settings: &UserSettings) {
 impl DiskInfoApp {
     pub fn new(context: &eframe::CreationContext<'_>) -> Self {
         context.egui_ctx.set_visuals(egui::Visuals::dark());
+        let settings = load_settings();
+        let raw_format = raw_format_from_setting(settings.raw_values);
+        let auto_refresh_seconds = auto_refresh_interval(settings.auto_refresh_minutes);
         let mut app = Self {
             drives: Vec::new(),
             selected: None,
@@ -217,12 +255,12 @@ impl DiskInfoApp {
             hide_serial: false,
             dark_theme: true,
             green_mode: false,
-            raw_format: RawFormat::Hex,
-            auto_refresh_seconds: None,
+            raw_format,
+            auto_refresh_seconds,
             last_scan_time: 0.0,
             graph_open: false,
             temperature_history: HashMap::new(),
-            settings: load_settings(),
+            settings,
             temperature_dialog: false,
             health_dialog: false,
             settings_drive: String::new(),
@@ -320,6 +358,10 @@ impl DiskInfoApp {
 
     fn set_interval(&mut self, seconds: Option<f64>) {
         self.auto_refresh_seconds = seconds;
+        self.settings.auto_refresh_minutes = seconds
+            .map(|seconds| (seconds / 60.0).round() as u32)
+            .unwrap_or_default();
+        save_settings(&self.settings);
         self.last_scan_time = 0.0;
     }
 }
@@ -604,6 +646,8 @@ impl DiskInfoApp {
                             .clicked()
                         {
                             self.raw_format = format;
+                            self.settings.raw_values = raw_format_setting(format);
+                            save_settings(&self.settings);
                             ui.close();
                         }
                     }
