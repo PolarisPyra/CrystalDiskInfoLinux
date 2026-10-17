@@ -1682,7 +1682,7 @@ impl DiskInfoApp {
                     attribute.current,
                     attribute.worst,
                     attribute.threshold,
-                    attribute.raw,
+                    format_raw(attribute, self.raw_format),
                 );
             }
             if self.settings.dump_identify {
@@ -1732,7 +1732,13 @@ impl DiskInfoApp {
             if !drive.nvme_metrics.is_empty() {
                 report.push_str("\n-- NVMe S.M.A.R.T. ---------------------------------------------------------\n");
                 for metric in &drive.nvme_metrics {
-                    let _ = writeln!(report, " {} : {}", metric.name, metric.value);
+                    let _ = writeln!(
+                        report,
+                        " {} : {}",
+                        metric.name,
+                        format_nvme_raw(metric, self.raw_format)
+                            .unwrap_or_else(|| metric.value.clone())
+                    );
                 }
             }
         }
