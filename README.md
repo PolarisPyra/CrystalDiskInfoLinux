@@ -14,6 +14,8 @@ A native Linux disk health application written in Rust with egui. It uses Crysta
 
 SMART access depends on `smartmontools` and permissions to access the relevant device. Values that the operating system or device does not expose are shown as unavailable. The port is in progress; vendor-specific controller support and the full CrystalDiskInfo feature set are not implemented yet.
 
+Health and temperature alerts use the desktop notification service through `notify-send` (provided by `libnotify`). Health alerts can be disabled per drive in **Function > Advanced Features > Health Status Setting**. Set a drive's temperature alarm to 0 °C to disable its temperature alerts.
+
 ## Build and run
 
 Requirements: Rust (Cargo) and optionally `smartmontools`. The desktop UI uses eframe with Wayland and X11 support.

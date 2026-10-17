@@ -4,7 +4,9 @@ use eframe::egui::{
     StrokeKind, Vec2,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fmt::Write as _, sync::mpsc, thread, time::Duration};
+use std::{
+    collections::HashMap, fmt::Write as _, process::Command, sync::mpsc, thread, time::Duration,
+};
 
 pub const MAIN_WINDOW_WIDTH: f32 = 1014.0;
 pub const MAIN_WINDOW_HEIGHT: f32 = 694.0;
@@ -54,6 +56,7 @@ pub struct DiskInfoApp {
     last_scan_time: f64,
     last_detection_time: f64,
     device_signature: storage::DeviceSignature,
+    temperature_alert_times: HashMap<String, f64>,
     graph_open: bool,
     temperature_history: HashMap<String, Vec<(f64, f32)>>,
     settings: UserSettings,
@@ -141,6 +144,10 @@ fn default_hide_raid_volume() -> bool {
     true
 }
 
+fn default_alarm_health_status() -> bool {
+    true
+}
+
 fn default_auto_refresh_minutes() -> u32 {
     10
 }
@@ -180,6 +187,8 @@ fn auto_detection_interval(seconds: u32) -> Option<f64> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct DriveSettings {
     temperature_alarm: i32,
+    #[serde(default = "default_alarm_health_status")]
+    alarm_health_status: bool,
     threshold_05: i32,
     threshold_c5: i32,
     threshold_c6: i32,
@@ -188,6 +197,7 @@ struct DriveSettings {
 
 #[derive(Clone, Debug)]
 struct HealthThresholds {
+    alarm_health_status: bool,
     threshold_05: i32,
     threshold_c5: i32,
     threshold_c6: i32,
@@ -197,6 +207,7 @@ struct HealthThresholds {
 impl Default for HealthThresholds {
     fn default() -> Self {
         Self {
+            alarm_health_status: true,
             threshold_05: 1,
             threshold_c5: 1,
             threshold_c6: 1,
@@ -213,6 +224,7 @@ impl DriveSettings {
             .is_some_and(|rate| rate == "SSD" || rate == "0");
         Self {
             temperature_alarm: if ssd { 60 } else { 50 },
+            alarm_health_status: true,
             threshold_05: 1,
             threshold_c5: 1,
             threshold_c6: 1,
@@ -279,6 +291,7 @@ impl DiskInfoApp {
             last_scan_time: 0.0,
             last_detection_time: 0.0,
             device_signature: Vec::new(),
+            temperature_alert_times: HashMap::new(),
             graph_open: false,
             temperature_history: HashMap::new(),
             settings,
@@ -327,6 +340,7 @@ impl DiskInfoApp {
         match receiver.try_recv() {
             Ok(drives) => {
                 let now = context.input(|input| input.time);
+                self.send_drive_alerts(&drives, now);
                 for drive in &drives {
                     if let Some(temperature) = drive.temperature_c {
                         let history = self
@@ -381,6 +395,118 @@ impl DiskInfoApp {
         (!self.settings.hide_no_smart_disk || drive.smart_available)
             && (!self.settings.hide_raid_volume
                 || !drive.model.to_ascii_uppercase().contains("RAID"))
+    }
+
+    fn send_drive_alerts(&mut self, current_drives: &[Drive], now: f64) {
+        for drive in current_drives {
+            let settings = self
+                .settings
+                .drives
+                .get(&drive.name)
+                .cloned()
+                .unwrap_or_else(|| DriveSettings::defaults(drive));
+            let previous = self.drives.iter().find(|old| old.name == drive.name);
+            let mut messages = Vec::new();
+            let mut urgency = "normal";
+
+            if settings.alarm_health_status
+                && let Some(previous) = previous
+            {
+                let previous_status =
+                    status_label_with_settings(previous, &settings, self.green_mode).0;
+                let current_status =
+                    status_label_with_settings(drive, &settings, self.green_mode).0;
+                if previous_status != "Unknown"
+                    && current_status != "Unknown"
+                    && previous_status != current_status
+                {
+                    messages.push(format!(
+                        "Health status: {previous_status} -> {current_status}"
+                    ));
+                    if status_severity(current_status) > status_severity(previous_status) {
+                        urgency = "critical";
+                    }
+                }
+
+                if let (Some(old), Some(new)) = (previous.health_percent, drive.health_percent)
+                    && new != old
+                {
+                    messages.push(format!("Estimated life: {old}% -> {new}%"));
+                    if new < old {
+                        urgency = "critical";
+                    }
+                }
+
+                let is_ssd = drive
+                    .rotation_rate
+                    .as_deref()
+                    .is_some_and(|rate| rate == "SSD" || rate == "0");
+                if !is_ssd {
+                    for id in [0x05, 0xC5, 0xC6] {
+                        let old = previous
+                            .ata_attributes
+                            .iter()
+                            .find(|attribute| attribute.id == id)
+                            .and_then(|attribute| attribute.raw_value)
+                            .map(|value| value as u16);
+                        let new = drive
+                            .ata_attributes
+                            .iter()
+                            .find(|attribute| attribute.id == id)
+                            .and_then(|attribute| attribute.raw_value)
+                            .map(|value| value as u16);
+                        if let (Some(old), Some(new)) = (old, new)
+                            && new != old
+                        {
+                            let name = drive
+                                .ata_attributes
+                                .iter()
+                                .find(|attribute| attribute.id == id)
+                                .map(|attribute| attribute.name.as_str())
+                                .unwrap_or("SMART attribute");
+                            messages.push(format!("{name}: {old} -> {new}"));
+                            if new > old {
+                                urgency = "critical";
+                            }
+                        }
+                    }
+                }
+            }
+
+            if settings.temperature_alarm > 0
+                && drive
+                    .temperature_c
+                    .is_some_and(|temperature| temperature >= i64::from(settings.temperature_alarm))
+            {
+                let last = self.temperature_alert_times.get(&drive.name).copied();
+                if last.is_none_or(|last| now - last >= 3600.0) {
+                    let temperature = drive.temperature_c.unwrap_or_default();
+                    messages.push(format!(
+                        "Temperature alert: {}",
+                        show_temperature(temperature, self.fahrenheit)
+                    ));
+                    self.temperature_alert_times.insert(drive.name.clone(), now);
+                    urgency = "critical";
+                }
+            }
+
+            if !messages.is_empty() {
+                let title = format!("{} health alert", drive.model);
+                let body = messages.join("\n");
+                if let Ok(mut child) = Command::new("notify-send")
+                    .arg("--app-name=Viper Disk Info")
+                    .arg(format!("--urgency={urgency}"))
+                    .arg("--expire-time=10000")
+                    .arg(title)
+                    .arg(body)
+                    .spawn()
+                {
+                    thread::spawn(move || {
+                        let _ = child.wait();
+                    });
+                }
+            }
+        }
     }
 
     fn set_interval(&mut self, seconds: Option<f64>) {
@@ -822,6 +948,7 @@ impl DiskInfoApp {
             .unwrap_or_else(|| DriveSettings::defaults(&drive));
         self.temperature_draft = settings.temperature_alarm;
         self.health_draft = HealthThresholds {
+            alarm_health_status: settings.alarm_health_status,
             threshold_05: settings.threshold_05,
             threshold_c5: settings.threshold_c5,
             threshold_c6: settings.threshold_c6,
@@ -870,15 +997,19 @@ impl DiskInfoApp {
                         ui.horizontal(|ui| {
                             ui.label("Alarm temperature");
                             ui.add(
-                                egui::Slider::new(&mut self.temperature_draft, 10..=90)
+                                egui::Slider::new(&mut self.temperature_draft, 0..=90)
                                     .suffix(" °C"),
                             );
                         });
-                        ui.label(format!(
-                            "{} °C / {} °F",
-                            self.temperature_draft,
-                            self.temperature_draft * 9 / 5 + 32
-                        ));
+                        if self.temperature_draft == 0 {
+                            ui.label("Temperature alerts disabled");
+                        } else {
+                            ui.label(format!(
+                                "{} °C / {} °F",
+                                self.temperature_draft,
+                                self.temperature_draft * 9 / 5 + 32
+                            ));
+                        }
                         ui.horizontal(|ui| {
                             if ui.button("Default").clicked() {
                                 self.temperature_draft =
@@ -932,6 +1063,7 @@ impl DiskInfoApp {
                                             .cloned()
                                             .unwrap_or_else(|| DriveSettings::defaults(drive));
                                         self.health_draft = HealthThresholds {
+                                            alarm_health_status: saved.alarm_health_status,
                                             threshold_05: saved.threshold_05,
                                             threshold_c5: saved.threshold_c5,
                                             threshold_c6: saved.threshold_c6,
@@ -940,6 +1072,10 @@ impl DiskInfoApp {
                                     }
                                 }
                             });
+                        ui.checkbox(
+                            &mut self.health_draft.alarm_health_status,
+                            "Alert when health status worsens",
+                        );
                         let ssd = visible_drives[index]
                             .rotation_rate
                             .as_deref()
@@ -978,6 +1114,7 @@ impl DiskInfoApp {
                                     .drives
                                     .entry(drive.name.clone())
                                     .or_insert_with(|| DriveSettings::defaults(drive));
+                                entry.alarm_health_status = self.health_draft.alarm_health_status;
                                 entry.threshold_05 = self.health_draft.threshold_05;
                                 entry.threshold_c5 = self.health_draft.threshold_c5;
                                 entry.threshold_c6 = self.health_draft.threshold_c6;
@@ -1527,7 +1664,8 @@ fn drive_view(
                             .unwrap_or_else(|| if fahrenheit { "-- °F" } else { "-- °C" }.into());
                         let temperature_color = match drive.temperature_c {
                             Some(temperature)
-                                if temperature >= i64::from(settings.temperature_alarm) =>
+                                if settings.temperature_alarm > 0
+                                    && temperature >= i64::from(settings.temperature_alarm) =>
                             {
                                 Color32::from_rgb(234, 77, 77)
                             }
@@ -1892,6 +2030,15 @@ fn status_label_with_settings(
         return unknown;
     }
     if caution { caution_status } else { good }
+}
+
+fn status_severity(status: &str) -> u8 {
+    match status {
+        "Good" => 1,
+        "Caution" => 2,
+        "Bad" => 3,
+        _ => 0,
+    }
 }
 
 fn show_temperature(celsius: i64, fahrenheit: bool) -> String {
