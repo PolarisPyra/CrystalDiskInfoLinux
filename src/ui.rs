@@ -2092,7 +2092,7 @@ fn drive_view(
                 ata_attribute_table(ui, drive, settings, raw_format);
             } else if !drive.nvme_metrics.is_empty() {
                 ui.label(RichText::new("NVMe S.M.A.R.T.").strong().size(12.0));
-                nvme_table(ui, drive, settings, green_mode);
+                nvme_table(ui, drive, settings, green_mode, raw_format);
             } else {
                 ui.label(
                     RichText::new(
@@ -2258,7 +2258,13 @@ fn format_raw(attribute: &storage::AtaSmartAttribute, format: RawFormat) -> Stri
     }
 }
 
-fn nvme_table(ui: &mut egui::Ui, drive: &Drive, settings: &DriveSettings, green_mode: bool) {
+fn nvme_table(
+    ui: &mut egui::Ui,
+    drive: &Drive,
+    settings: &DriveSettings,
+    green_mode: bool,
+    raw_format: RawFormat,
+) {
     Grid::new("nvme_smart_table")
         .num_columns(4)
         .spacing(Vec2::new(10.0, 3.0))
@@ -2273,10 +2279,48 @@ fn nvme_table(ui: &mut egui::Ui, drive: &Drive, settings: &DriveSettings, green_
                 ui.colored_label(color, label);
                 ui.label(format!("{:02X}", metric.id));
                 ui.label(&metric.name);
-                ui.label(&metric.value);
+                ui.label(
+                    format_nvme_raw(metric, raw_format).unwrap_or_else(|| metric.value.clone()),
+                );
                 ui.end_row();
             }
         });
+}
+
+fn format_nvme_raw(metric: &storage::Metric, format: RawFormat) -> Option<String> {
+    let value = if metric.id == 0x01 {
+        u64::from_str_radix(metric.value.strip_prefix("0x")?, 16).ok()?
+    } else {
+        let numeric = metric
+            .value
+            .split_whitespace()
+            .next()?
+            .trim_end_matches('%');
+        if metric.id == 0x02 || (0x12..=0x19).contains(&metric.id) {
+            u64::try_from(numeric.parse::<i64>().ok()? + 273).ok()?
+        } else {
+            numeric.parse::<u64>().ok()?
+        }
+    } & 0x0000_FFFF_FFFF_FFFF;
+
+    let bytes = value.to_le_bytes();
+    Some(match format {
+        RawFormat::Hex => format!(
+            "00{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+            bytes[5], bytes[4], bytes[3], bytes[2], bytes[1], bytes[0]
+        ),
+        RawFormat::Decimal => value.to_string(),
+        RawFormat::TwoByte => format!(
+            "{} {} {}",
+            u16::from_le_bytes([bytes[4], bytes[5]]),
+            u16::from_le_bytes([bytes[2], bytes[3]]),
+            u16::from_le_bytes([bytes[0], bytes[1]])
+        ),
+        RawFormat::OneByte => format!(
+            "{} {} {} {} {} {}",
+            bytes[5], bytes[4], bytes[3], bytes[2], bytes[1], bytes[0]
+        ),
+    })
 }
 
 fn nvme_metric_status(
